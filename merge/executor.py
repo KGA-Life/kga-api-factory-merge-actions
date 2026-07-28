@@ -35,9 +35,29 @@ CLAUDE_BOT_LOGIN = os.environ.get("CLAUDE_BOT_LOGIN", signals.DEFAULT_BOT_LOGIN)
 # Check-run names EXCLUDED from the hard CI-green signal — the AI-review runs (`claude`,
 # `claude-review`), which are advisory and can fail/stall independently of the code (KGA-334). Only
 # the deterministic test/lint/build CI gates the merge. Override via a comma-separated env var.
-IGNORE_CHECK_NAMES = tuple(
+_BASE_IGNORE = tuple(
     n.strip() for n in os.environ.get("MERGE_IGNORE_CHECK_NAMES", "").split(",") if n.strip()
 ) or signals.AI_REVIEW_CHECK_NAMES
+
+# The merge-gate workflow's OWN check-run (`merge-gate / gate-and-merge`) also appears on the PR head
+# SHA while this executor runs. It MUST be excluded from the CI-green signal too — otherwise the gate
+# reads its own in-progress run as a pending CI check and denies EVERY merge (a self-reference
+# deadlock; the merge-gate analogue of the T47 post-merge-verify self-exclusion). Excluded two ways,
+# mirroring revert._poll_ci: by this workflow's Actions run id (name-independent, matched in a run's
+# ``details_url`` — the real fix) AND by the job's check-run leaf name (belt-and-suspenders,
+# overridable). (KGA-336)
+SELF_CHECK_NAME = os.environ.get("MERGE_GATE_CHECK_NAME", "gate-and-merge")
+SELF_RUN_ID = os.environ.get("GITHUB_RUN_ID")
+IGNORE_CHECK_NAMES = (*_BASE_IGNORE, SELF_CHECK_NAME)
+
+
+def _drop_self_runs(check_runs: list[dict]) -> list[dict]:
+    """Drop this workflow's own check-run (by Actions run id in ``details_url``) so the gate never
+    counts its own still-running check as pending CI. Name-independent; a no-op when ``GITHUB_RUN_ID``
+    is unset (e.g. local / ``workflow_dispatch`` without the Actions env)."""
+    if not SELF_RUN_ID:
+        return list(check_runs or [])
+    return [r for r in (check_runs or []) if SELF_RUN_ID not in (r.get("details_url") or "")]
 
 
 def _gather_signals(api: GitHubApi, owner: str, repo: str, number: int, sha: str, labels: list[dict]) -> dict:
@@ -48,7 +68,7 @@ def _gather_signals(api: GitHubApi, owner: str, repo: str, number: int, sha: str
         api.list_issue_comments(owner, repo, number), bot_login=CLAUDE_BOT_LOGIN
     )
     ci_green, ci_ev = signals.ci_green_for_sha(
-        api.list_check_runs(owner, repo, sha),
+        _drop_self_runs(api.list_check_runs(owner, repo, sha)),
         api.get_combined_status(owner, repo, sha),
         sha,
         ignore_check_names=IGNORE_CHECK_NAMES,
@@ -112,7 +132,7 @@ def run(
         return {"outcome": "aborted_unmergeable", "verdict": verdict}
 
     ci_green_now, ci_ev_now = signals.ci_green_for_sha(
-        api.list_check_runs(owner, repo, current_sha),
+        _drop_self_runs(api.list_check_runs(owner, repo, current_sha)),
         api.get_combined_status(owner, repo, current_sha),
         current_sha,
         ignore_check_names=IGNORE_CHECK_NAMES,

@@ -190,3 +190,46 @@ def test_failing_ai_review_does_not_block_merge():
     out = _run(api)
     assert out["outcome"] == "merged"
     assert api.merge_calls == [{"sha": A, "merge_method": "merge"}]
+
+
+# --- KGA-336: the executor must not count its OWN merge-gate check-run as pending CI -------------
+def test_own_merge_gate_check_ignored_by_name_merges():
+    # the merge-gate workflow's own in-progress check-run (`merge-gate / gate-and-merge`) sits on the
+    # PR head SHA while the executor runs; it must be excluded (leaf name 'gate-and-merge') or the
+    # gate reads its own run as pending CI and denies every merge (the self-reference deadlock).
+    mixed = [
+        _green(A)[0],
+        {"name": "merge-gate / gate-and-merge", "status": "in_progress", "conclusion": None, "head_sha": A},
+    ]
+    api = FakeApi(pulls=[_open_pr(A), _open_pr(A)], checks=[mixed, mixed], statuses=[_empty_status(), _empty_status()])
+    out = _run(api)
+    assert out["outcome"] == "merged"
+    assert api.merge_calls == [{"sha": A, "merge_method": "merge"}]
+
+
+def test_own_run_dropped_by_run_id_merges(monkeypatch):
+    # name-independent self-exclusion: a still-running check whose details_url carries THIS Actions
+    # run id is dropped even when its leaf name is not in the ignore list — the robust fix (KGA-336).
+    monkeypatch.setattr(executor, "SELF_RUN_ID", "42424242")
+    mixed = [
+        _green(A)[0],
+        {"name": "renamed-gate-job", "status": "in_progress", "conclusion": None, "head_sha": A,
+         "details_url": "https://github.com/KGA-Life/kga-x/actions/runs/42424242/job/9"},
+    ]
+    api = FakeApi(pulls=[_open_pr(A), _open_pr(A)], checks=[mixed, mixed], statuses=[_empty_status(), _empty_status()])
+    out = _run(api)
+    assert out["outcome"] == "merged"
+    assert api.merge_calls == [{"sha": A, "merge_method": "merge"}]
+
+
+def test_unrelated_pending_check_still_blocks():
+    # guardrail against over-exclusion: a genuinely-different in-progress check (not this workflow's
+    # own run, name not ignored) must STILL block the merge as a transient CI-not-green deny.
+    mixed = [
+        _green(A)[0],
+        {"name": "integration-tests", "status": "in_progress", "conclusion": None, "head_sha": A},
+    ]
+    api = FakeApi(pulls=[_open_pr(A)], checks=[mixed], statuses=[_empty_status()])
+    out = _run(api)
+    assert out["outcome"] == "denied"
+    assert api.merge_calls == []
