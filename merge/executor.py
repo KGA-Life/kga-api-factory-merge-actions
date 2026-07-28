@@ -64,8 +64,12 @@ def _gather_signals(api: GitHubApi, owner: str, repo: str, number: int, sha: str
     """Derive the three gate signals for ``sha`` from the already-fetched ``labels`` plus freshly
     fetched comments/checks. Returns the kwargs ``evaluate_gate`` wants plus a merged evidence dict."""
     labeled, label_ev = signals.merge_candidate_labeled(labels, label_name=MERGE_CANDIDATE_LABEL)
-    review_final, review_ev = signals.review_present_and_final(
-        api.list_issue_comments(owner, repo, number), bot_login=CLAUDE_BOT_LOGIN
+    comments = api.list_issue_comments(owner, repo, number)
+    review_final, review_ev = signals.review_present_and_final(comments, bot_login=CLAUDE_BOT_LOGIN)
+    # The reviewer's explicit verdict (KGA-337): a CHANGES_REQUESTED review is a hard block, so a
+    # blocking @claude review can't be merged just because the label is on and CI is green.
+    verdict, verdict_ev = signals.review_verdict(
+        api.list_reviews(owner, repo, number), comments, bot_login=CLAUDE_BOT_LOGIN, head_sha=sha
     )
     ci_green, ci_ev = signals.ci_green_for_sha(
         _drop_self_runs(api.list_check_runs(owner, repo, sha)),
@@ -74,10 +78,11 @@ def _gather_signals(api: GitHubApi, owner: str, repo: str, number: int, sha: str
         ignore_check_names=IGNORE_CHECK_NAMES,
     )
     return {
-        "review_greenlit": labeled and review_final,
+        "review_greenlit": labeled and review_final and verdict != signals.REVIEW_CHANGES_REQUESTED,
         "criteria_met": labeled,
         "ci_green": ci_green,
-        "evidence": {"label": label_ev, "review": review_ev, "ci": ci_ev},
+        "verdict": verdict,
+        "evidence": {"label": label_ev, "review": review_ev, "review_verdict": verdict_ev, "ci": ci_ev},
     }
 
 
@@ -106,6 +111,10 @@ def run(
         ci_green=sig["ci_green"],
         evidence={**sig["evidence"], "head_sha": head_sha},
     )
+    # Name the blocking-review case explicitly in the audit trail (review_greenlit alone reads as a
+    # missing/incomplete review; a CHANGES_REQUESTED verdict is a different, actionable thing).
+    if sig.get("verdict") == signals.REVIEW_CHANGES_REQUESTED:
+        verdict["reasons"].append("the @claude review verdict is CHANGES_REQUESTED (blocking)")
 
     if not verdict["authorise"]:
         # Comment only on an ACTIONABLE deny (a review/criteria problem the loop must fix); a

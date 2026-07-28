@@ -15,11 +15,12 @@ B = "bbbbbbbbbbbb2222"
 
 
 class FakeApi:
-    def __init__(self, *, pulls, comments=None, checks, statuses, merge_error=None, merge_result=None):
+    def __init__(self, *, pulls, comments=None, checks, statuses, reviews=None, merge_error=None, merge_result=None):
         self._pulls = list(pulls)
         self._comments = comments if comments is not None else _final_comments()
         self._checks = list(checks)
         self._statuses = list(statuses)
+        self._reviews = list(reviews or [])
         self._merge_error = merge_error
         self._merge_result = merge_result or {"sha": "mergecommitsha"}
         self.created_comments: list[str] = []
@@ -34,6 +35,9 @@ class FakeApi:
 
     def list_issue_comments(self, o, r, n):
         return self._comments
+
+    def list_reviews(self, o, r, n):
+        return self._reviews
 
     def list_check_runs(self, o, r, sha):
         return self._next(self._checks)
@@ -233,3 +237,74 @@ def test_unrelated_pending_check_still_blocks():
     out = _run(api)
     assert out["outcome"] == "denied"
     assert api.merge_calls == []
+
+
+# --- KGA-337: the gate must BLOCK on a changes-requested review verdict -------------------------
+def _review(state, login="claude[bot]", rid=1, submitted="2026-07-28T10:00:00Z", commit=A):
+    return {"user": {"login": login}, "state": state, "id": rid, "submitted_at": submitted, "commit_id": commit}
+
+
+def test_blocking_formal_review_denies_even_with_label_and_green_ci():
+    # label present, review comment final, CI green — but a formal CHANGES_REQUESTED review from the
+    # bot must block the merge (the hole T35 surfaced). Actionable deny -> a routing comment.
+    api = FakeApi(pulls=[_open_pr(A)], checks=[_green(A)], statuses=[_empty_status()],
+                  reviews=[_review("CHANGES_REQUESTED")])
+    out = _run(api)
+    assert out["outcome"] == "denied"
+    assert out["verdict"]["signals"]["review_greenlit"] is False
+    assert any("CHANGES_REQUESTED" in r for r in out["verdict"]["reasons"])
+    assert api.merge_calls == []
+    assert len(api.created_comments) == 1  # actionable -> commented
+
+
+def test_blocking_verdict_marker_in_comment_denies():
+    # no formal review, but the latest claude[bot] comment carries a VERDICT marker -> block.
+    marker = [{"user": {"login": "claude[bot]"}, "body": "Findings remain.\n\nVERDICT: REQUEST_CHANGES",
+               "id": 9, "created_at": "2026-07-28T11:00:00Z"}]
+    api = FakeApi(pulls=[_open_pr(A)], comments=marker, checks=[_green(A)], statuses=[_empty_status()])
+    out = _run(api)
+    assert out["outcome"] == "denied"
+    assert api.merge_calls == []
+
+
+def test_approving_formal_review_merges():
+    # an explicit APPROVED review is not a block; with label + green CI it merges.
+    api = FakeApi(pulls=[_open_pr(A), _open_pr(A)], checks=[_green(A), _green(A)],
+                  statuses=[_empty_status(), _empty_status()], reviews=[_review("APPROVED")])
+    out = _run(api)
+    assert out["outcome"] == "merged"
+    assert api.merge_calls == [{"sha": A, "merge_method": "merge"}]
+
+
+def test_no_verdict_is_non_regressive_and_merges():
+    # the current reality (reviewer emits neither a formal review nor a marker) must behave exactly
+    # as before: label + final review comment + green CI -> merged.
+    api = FakeApi(pulls=[_open_pr(A), _open_pr(A)], checks=[_green(A), _green(A)],
+                  statuses=[_empty_status(), _empty_status()], reviews=[])
+    out = _run(api)
+    assert out["outcome"] == "merged"
+    assert out["verdict"]["evidence"]["review_verdict"]["verdict"] == "none"
+    assert api.merge_calls == [{"sha": A, "merge_method": "merge"}]
+
+
+def test_stale_blocking_review_on_old_commit_does_not_block():
+    # a CHANGES_REQUESTED review bound to an OLD commit must not block the current head (VG-4 for
+    # reviews): label + final comment + green CI on head A merge despite the stale block on B.
+    api = FakeApi(pulls=[_open_pr(A), _open_pr(A)], checks=[_green(A), _green(A)],
+                  statuses=[_empty_status(), _empty_status()],
+                  reviews=[_review("CHANGES_REQUESTED", commit=B)])
+    out = _run(api)
+    assert out["outcome"] == "merged"
+    assert api.merge_calls == [{"sha": A, "merge_method": "merge"}]
+
+
+def test_later_approval_overrides_earlier_changes_requested():
+    # the LATEST graded review wins: an earlier CHANGES_REQUESTED followed by a later APPROVED merges.
+    api = FakeApi(
+        pulls=[_open_pr(A), _open_pr(A)], checks=[_green(A), _green(A)],
+        statuses=[_empty_status(), _empty_status()],
+        reviews=[_review("CHANGES_REQUESTED", rid=1, submitted="2026-07-28T10:00:00Z"),
+                 _review("APPROVED", rid=2, submitted="2026-07-28T10:30:00Z")],
+    )
+    out = _run(api)
+    assert out["outcome"] == "merged"

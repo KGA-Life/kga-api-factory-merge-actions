@@ -89,6 +89,25 @@ class GitHubApi:
             page += 1
         return out
 
+    def list_reviews(self, owner: str, repo: str, number: int) -> list[dict]:
+        # Formal PR reviews (APPROVED / CHANGES_REQUESTED / COMMENTED / DISMISSED). Paginated for the
+        # same reason as list_issue_comments — a busy PR can accrue >100 reviews and the gate needs
+        # the latest per reviewer (KGA-337).
+        out: list[dict] = []
+        page = 1
+        while True:
+            batch = self._request(
+                "GET",
+                f"/repos/{owner}/{repo}/pulls/{number}/reviews?per_page=100&page={page}",
+            )
+            if not isinstance(batch, list) or not batch:
+                break
+            out.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        return out
+
     def list_check_runs(self, owner: str, repo: str, ref: str) -> list[dict]:
         body = self._request("GET", f"/repos/{owner}/{repo}/commits/{ref}/check-runs?per_page=100")
         return body.get("check_runs", [])
