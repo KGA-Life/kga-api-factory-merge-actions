@@ -1,0 +1,88 @@
+name: post-merge-verify
+
+# T47 post-merge verification + auto-revert. After a merge lands on the default branch, re-verify
+# the branch on the merge commit; on red, auto-revert (a fresh revert PR merged by the same
+# non-Claude-Code actor) so a "Done" issue always corresponds to a healthy `main`. Idempotent on
+# the merge SHA (the revert branch is `revert/<short-merge-sha>`, and an existing revert is a no-op).
+#
+#   * workflow_call     — PRODUCTION: the generated repo calls this from its own `push`-to-main
+#                         workflow, passing the merge commit SHA. `github.*` = the caller (target).
+#   * workflow_dispatch — bring-up / dogfood against an explicit {owner, repo, merge_sha}.
+#
+# Two checkouts: the TARGET repo (full history — the `git revert` runs against it) at ./target, and
+# the `merge/` machinery (THIS public repo) at ./machinery (tokenless). The python runs with
+# cwd=target so git operates on the target, and PYTHONPATH=machinery so `merge` imports. Version
+# pinning via `machinery_ref` is the same as merge-gate.yml.
+
+on:
+  workflow_call:
+    inputs:
+      owner: { required: false, type: string, default: '' }
+      repo: { required: false, type: string, default: '' }
+      merge_sha: { required: true, type: string }
+      base: { required: false, type: string, default: main }
+      pr: { required: false, type: string, default: '' }
+      issue: { required: false, type: string, default: '' }
+      machinery_ref: { required: false, type: string, default: main }
+    secrets:
+      merge_token: { required: false }
+  workflow_dispatch:
+    inputs:
+      owner: { required: true, type: string }
+      repo: { required: true, type: string }
+      merge_sha: { required: true, type: string }
+      base: { type: string, default: main }
+      pr: { type: string, default: '' }
+      issue: { type: string, default: '' }
+      machinery_ref: { type: string, default: main }
+
+permissions:
+  contents: write # push the revert branch + merge the revert PR
+  pull-requests: write # open + annotate the revert PR
+  checks: read
+  statuses: read
+
+jobs:
+  verify-and-maybe-revert:
+    # Explicit check-run name so revert._poll_ci's self-exclusion (POST_MERGE_VERIFY_CHECK_NAME,
+    # default "post-merge-verify") matches — without this the check-run takes the job id and the
+    # poll would wait on its own run. Belt-and-suspenders with the run-id exclusion in _poll_ci.
+    name: post-merge-verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out target (explicit — dispatch / cross-repo)
+        if: inputs.repo != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.owner }}/${{ inputs.repo }}
+          token: ${{ secrets.merge_token || github.token }}
+          fetch-depth: 0
+          path: target
+      - name: Check out target (implicit caller — workflow_call)
+        if: inputs.repo == ''
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: target
+      - name: Check out the merge machinery
+        uses: actions/checkout@v4
+        with:
+          repository: KGA-Life/kga-api-factory-merge-actions
+          ref: ${{ inputs.machinery_ref }}
+          path: machinery
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Post-merge verify + auto-revert
+        working-directory: target
+        env:
+          GITHUB_TOKEN: ${{ secrets.merge_token || github.token }}
+          PYTHONIOENCODING: utf-8
+        run: |
+          OWNER="${{ inputs.owner }}"; [ -z "$OWNER" ] && OWNER="${{ github.repository_owner }}"
+          REPO="${{ inputs.repo }}"; [ -z "$REPO" ] && REPO="${{ github.event.repository.name }}"
+          ARGS="--owner $OWNER --repo $REPO --merge-sha ${{ inputs.merge_sha }} --base ${{ inputs.base }}"
+          if [ -n "${{ inputs.pr }}" ]; then ARGS="$ARGS --pr ${{ inputs.pr }}"; fi
+          if [ -n "${{ inputs.issue }}" ]; then ARGS="$ARGS --issue ${{ inputs.issue }}"; fi
+          echo "post-merge-verify: $ARGS"
+          PYTHONPATH="$GITHUB_WORKSPACE/machinery" python -m merge.revert $ARGS

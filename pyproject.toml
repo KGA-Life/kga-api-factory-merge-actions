@@ -1,0 +1,17 @@
+# Tooling config for the `merge/` package (the autonomous-merge machinery). This repo is a
+# reusable-GitHub-Actions + Python library, not an installable package — stdlib-only at runtime
+# (urllib/json/os), so there are no project dependencies; ruff + pytest are dev tools installed in CI.
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# Long prose string literals (audit-comment bodies, docstrings) — line-length on them is noise.
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["merge/tests"]
+addopts = "-q"
+pythonpath = ["."]

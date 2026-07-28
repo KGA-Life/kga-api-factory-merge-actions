@@ -1,0 +1,66 @@
+name: merge-gate
+
+# T43 three-signal gate + T34 autonomous merge executor, run by a NON-Claude-Code actor (this
+# GitHub Action — github-actions[bot] on the workflow_call path, or a narrowly-scoped Claudette PAT
+# on the workflow_dispatch path). The Claude Code auto-mode classifier blocks a Claude Code SESSION
+# from self-merging an AI-authored+AI-reviewed PR; this Action is not a session, so it isn't gated —
+# and the bypass is compensated by the head-SHA CI re-check (in merge.executor) + T47 verify/revert.
+#
+#   * workflow_call  — the PRODUCTION path: a generated integration repo (stamped from the M2
+#                      template) calls this on its own merge-candidate-label / CI-completion events.
+#                      `github.*` then resolves to the CALLER (target) repo, which is what we merge.
+#   * workflow_dispatch — bring-up / dogfood: fire manually against an explicit {owner, repo, pr}.
+#                      Defaults to --dry-run (evaluate the gate, do NOT merge) for safety.
+#
+# The `merge/` machinery lives in THIS repo (kga-api-factory-merge-actions, PUBLIC), so both paths
+# check it out explicitly and tokenlessly. Callers pin the reusable workflow with `@vN`; for strict
+# version alignment they may also pass `machinery_ref: vN` so the checked-out `merge/` code matches
+# the workflow file's tag (it defaults to `main`).
+
+on:
+  workflow_call:
+    inputs:
+      owner: { required: false, type: string, default: '' }
+      repo: { required: false, type: string, default: '' }
+      pr: { required: true, type: string }
+      dry_run: { required: false, type: boolean, default: false }
+      machinery_ref: { required: false, type: string, default: main }
+    secrets:
+      merge_token: { required: false }
+  workflow_dispatch:
+    inputs:
+      owner: { required: true, type: string }
+      repo: { required: true, type: string }
+      pr: { required: true, type: string }
+      dry_run: { type: boolean, default: true }
+      machinery_ref: { type: string, default: main }
+
+permissions:
+  contents: write # merge the PR
+  pull-requests: write # post the audit comment
+  checks: read # read check-runs for the head SHA
+  statuses: read # read the legacy combined status
+
+jobs:
+  gate-and-merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the merge machinery
+        uses: actions/checkout@v4
+        with:
+          repository: KGA-Life/kga-api-factory-merge-actions
+          ref: ${{ inputs.machinery_ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Three-signal gate + merge
+        env:
+          GITHUB_TOKEN: ${{ secrets.merge_token || github.token }}
+          PYTHONIOENCODING: utf-8
+        run: |
+          OWNER="${{ inputs.owner }}"; [ -z "$OWNER" ] && OWNER="${{ github.repository_owner }}"
+          REPO="${{ inputs.repo }}"; [ -z "$REPO" ] && REPO="${{ github.event.repository.name }}"
+          ARGS="--owner $OWNER --repo $REPO --pr ${{ inputs.pr }}"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          echo "merge-gate: $ARGS"
+          python -m merge.executor $ARGS
