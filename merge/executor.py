@@ -69,7 +69,7 @@ def _gather_signals(api: GitHubApi, owner: str, repo: str, number: int, sha: str
     # The reviewer's explicit verdict (KGA-337): a CHANGES_REQUESTED review is a hard block, so a
     # blocking @claude review can't be merged just because the label is on and CI is green.
     verdict, verdict_ev = signals.review_verdict(
-        api.list_reviews(owner, repo, number), comments, bot_login=CLAUDE_BOT_LOGIN
+        api.list_reviews(owner, repo, number), comments, bot_login=CLAUDE_BOT_LOGIN, head_sha=sha
     )
     ci_green, ci_ev = signals.ci_green_for_sha(
         _drop_self_runs(api.list_check_runs(owner, repo, sha)),

@@ -107,6 +107,7 @@ def review_verdict(
     comments: list[dict],
     *,
     bot_login: str = DEFAULT_BOT_LOGIN,
+    head_sha: str | None = None,
 ) -> tuple[str, dict]:
     """The reviewer's explicit verdict on the PR (KGA-337) — the piece that lets the gate BLOCK on a
     changes-requested review instead of trusting the label as the only review proxy.
@@ -127,11 +128,29 @@ def review_verdict(
     """
     mine = [r for r in reviews or [] if (r.get("user") or {}).get("login") == bot_login]
     graded = [r for r in mine if (r.get("state") or "").upper() in _GRADED_STATES]
+
+    # VG-4-style staleness guard: a formal review is bound to a commit (``commit_id``); once head
+    # moves past it, it no longer speaks to the current code. When a ``head_sha`` is supplied, drop
+    # graded reviews recorded against a DIFFERENT commit — mirroring ``ci_green_for_sha``. This stops
+    # a stale CHANGES_REQUESTED against an old commit from blocking forever (which formal reviews,
+    # outranking the marker, otherwise would): the loop re-requests review on every push, so a fresh
+    # review on the new head is expected. A review with no ``commit_id`` is kept (can't prove stale).
+    stale_dropped = 0
+    if head_sha:
+        kept = []
+        for r in graded:
+            cid = r.get("commit_id")
+            if cid and cid != head_sha:
+                stale_dropped += 1
+            else:
+                kept.append(r)
+        graded = kept
+
     if graded:
         latest = max(graded, key=lambda r: (r.get("submitted_at") or "", r.get("id") or 0))
         state = (latest.get("state") or "").upper()
         verdict = REVIEW_CHANGES_REQUESTED if state == "CHANGES_REQUESTED" else REVIEW_APPROVE
-        return verdict, {"verdict": verdict, "source": "formal_review", "review_id": latest.get("id"), "state": state}
+        return verdict, {"verdict": verdict, "source": "formal_review", "review_id": latest.get("id"), "state": state, "stale_reviews_dropped": stale_dropped}
 
     bot_comments = [c for c in comments or [] if (c.get("user") or {}).get("login") == bot_login]
     if bot_comments:
@@ -140,9 +159,9 @@ def review_verdict(
         if match:
             token = match.group(1).upper()
             verdict = REVIEW_APPROVE if token == "APPROVE" else REVIEW_CHANGES_REQUESTED
-            return verdict, {"verdict": verdict, "source": "comment_marker", "comment_id": latest_c.get("id"), "marker": token}
+            return verdict, {"verdict": verdict, "source": "comment_marker", "comment_id": latest_c.get("id"), "marker": token, "stale_reviews_dropped": stale_dropped}
 
-    return REVIEW_NONE, {"verdict": REVIEW_NONE, "source": "none"}
+    return REVIEW_NONE, {"verdict": REVIEW_NONE, "source": "none", "stale_reviews_dropped": stale_dropped}
 
 
 def ci_green_for_sha(

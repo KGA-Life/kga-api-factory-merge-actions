@@ -240,8 +240,8 @@ def test_unrelated_pending_check_still_blocks():
 
 
 # --- KGA-337: the gate must BLOCK on a changes-requested review verdict -------------------------
-def _review(state, login="claude[bot]", rid=1, submitted="2026-07-28T10:00:00Z"):
-    return {"user": {"login": login}, "state": state, "id": rid, "submitted_at": submitted}
+def _review(state, login="claude[bot]", rid=1, submitted="2026-07-28T10:00:00Z", commit=A):
+    return {"user": {"login": login}, "state": state, "id": rid, "submitted_at": submitted, "commit_id": commit}
 
 
 def test_blocking_formal_review_denies_even_with_label_and_green_ci():
@@ -284,6 +284,17 @@ def test_no_verdict_is_non_regressive_and_merges():
     out = _run(api)
     assert out["outcome"] == "merged"
     assert out["verdict"]["evidence"]["review_verdict"]["verdict"] == "none"
+    assert api.merge_calls == [{"sha": A, "merge_method": "merge"}]
+
+
+def test_stale_blocking_review_on_old_commit_does_not_block():
+    # a CHANGES_REQUESTED review bound to an OLD commit must not block the current head (VG-4 for
+    # reviews): label + final comment + green CI on head A merge despite the stale block on B.
+    api = FakeApi(pulls=[_open_pr(A), _open_pr(A)], checks=[_green(A), _green(A)],
+                  statuses=[_empty_status(), _empty_status()],
+                  reviews=[_review("CHANGES_REQUESTED", commit=B)])
+    out = _run(api)
+    assert out["outcome"] == "merged"
     assert api.merge_calls == [{"sha": A, "merge_method": "merge"}]
 
 

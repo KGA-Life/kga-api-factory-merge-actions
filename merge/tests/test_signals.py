@@ -183,8 +183,11 @@ def test_ci_ignore_is_case_insensitive():
 
 
 # --- review_verdict (KGA-337) ------------------------------------------------
-def _rv(state, login="claude[bot]", rid=1, submitted="2026-07-28T10:00:00Z"):
-    return {"user": {"login": login}, "state": state, "id": rid, "submitted_at": submitted}
+def _rv(state, login="claude[bot]", rid=1, submitted="2026-07-28T10:00:00Z", commit=None):
+    r = {"user": {"login": login}, "state": state, "id": rid, "submitted_at": submitted}
+    if commit is not None:
+        r["commit_id"] = commit
+    return r
 
 
 def test_verdict_formal_changes_requested():
@@ -245,6 +248,34 @@ def test_verdict_formal_review_takes_priority_over_marker():
 def test_verdict_none_when_no_review_or_marker():
     v, _ = signals.review_verdict([], [_c("claude[bot]", "Review complete, good to merge")])
     assert v == signals.REVIEW_NONE
+
+
+# VG-4 staleness guard on formal reviews (KGA-337 review finding)
+def test_verdict_drops_stale_formal_review_bound_to_old_commit():
+    v, ev = signals.review_verdict([_rv("CHANGES_REQUESTED", commit="oldsha")], [], head_sha="newsha")
+    assert v == signals.REVIEW_NONE
+    assert ev["stale_reviews_dropped"] == 1
+
+
+def test_verdict_keeps_current_head_formal_review():
+    v, _ = signals.review_verdict([_rv("CHANGES_REQUESTED", commit="head")], [], head_sha="head")
+    assert v == signals.REVIEW_CHANGES_REQUESTED
+
+
+def test_verdict_review_without_commit_id_is_kept():
+    # can't prove staleness without a commit_id -> keep it (mirrors ci_green_for_sha's "present and !=")
+    v, _ = signals.review_verdict([_rv("CHANGES_REQUESTED")], [], head_sha="head")
+    assert v == signals.REVIEW_CHANGES_REQUESTED
+
+
+def test_verdict_stale_block_dropped_then_current_marker_approves():
+    # the scenario the reviewer flagged: a stale CHANGES_REQUESTED on old code no longer blocks, and a
+    # later VERDICT: APPROVE marker on the fixed head is honored.
+    reviews = [_rv("CHANGES_REQUESTED", commit="oldsha")]
+    comments = [_c("claude[bot]", "fixed now\n\nVERDICT: APPROVE")]
+    v, ev = signals.review_verdict(reviews, comments, head_sha="newsha")
+    assert v == signals.REVIEW_APPROVE
+    assert ev["source"] == "comment_marker"
 
 
 def test_ci_ignore_does_not_over_exclude_names_merely_containing_token():
