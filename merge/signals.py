@@ -43,10 +43,11 @@ _OK_CONCLUSIONS = {"success", "neutral", "skipped"}
 # `claude-review` (the auto-review, claude-code-review.yml). They are advisory and can fail or stall
 # independently of the code (the auto-review currently fails on every PR — KGA-335), so they must
 # NOT gate the deterministic CI-green signal: otherwise a red/pending review blocks a valid merge,
-# and the post-merge auto-revert would fire on a healthy merge. The single substring token `claude`
-# catches both names (matched case-insensitively). Callers pass this to ``ci_green_for_sha`` via
-# ``ignore_check_names``. (KGA-334)
-AI_REVIEW_CHECK_NAMES = ("claude",)
+# and the post-merge auto-revert would fire on a healthy merge. These are the FULL check-run names
+# (matched by leaf + case-insensitively — see ci_green_for_sha), NOT open substrings, so a generated
+# repo whose own repo/workflow/job name merely contains "claude" is not swept up. Callers pass this
+# to ``ci_green_for_sha`` via ``ignore_check_names``. (KGA-334)
+AI_REVIEW_CHECK_NAMES = ("claude", "claude-review")
 
 
 def merge_candidate_labeled(
@@ -102,19 +103,22 @@ def ci_green_for_sha(
       * the legacy combined commit-status, IF any statuses exist, is ``success`` (Actions report as
         check-runs so this is usually empty; when empty it is not consulted).
 
-    ``ignore_check_names`` drops runs whose name CONTAINS any given token (a **case-insensitive**
-    substring match, not exact) — e.g. the post-merge-verify workflow's own run (whose check-run
-    name is the job id on the dispatch path but may be composed as ``<caller> / post-merge-verify``
-    on the ``workflow_call`` path), and the AI-review runs (``AI_REVIEW_CHECK_NAMES``). Runs whose
-    ``head_sha`` is present and != ``sha`` are dropped as stale — the VG-4 guard: a green on a
-    superseded SHA never counts.
+    ``ignore_check_names`` drops runs by matching each run's **leaf name** — the segment after any
+    ``<caller> /`` prefix that a reusable ``workflow_call`` composes onto the job name — **exactly**
+    (case-insensitively) against the given full names (e.g. ``post-merge-verify`` for the workflow's
+    own run, and the AI-review runs ``AI_REVIEW_CHECK_NAMES``). Leaf-exact (NOT an open substring),
+    so a caller whose repo/workflow/job name merely *contains* a token like "claude" is not swept
+    up — only a check whose leaf IS ``claude`` / ``claude-review`` is dropped. Runs whose ``head_sha``
+    is present and != ``sha`` are dropped as stale — the VG-4 guard: a green on a superseded SHA
+    never counts.
     """
-    lowered_ignore = tuple(tok.lower() for tok in ignore_check_names)
+    ignore_leaves = {tok.strip().lower() for tok in ignore_check_names}
     relevant = []
     stale_dropped = 0
     for run in check_runs or []:
         name = run.get("name") or ""
-        if any(tok in name.lower() for tok in lowered_ignore):
+        leaf = name.rsplit("/", 1)[-1].strip().lower()
+        if leaf in ignore_leaves:
             continue
         run_sha = run.get("head_sha")
         if run_sha and run_sha != sha:
