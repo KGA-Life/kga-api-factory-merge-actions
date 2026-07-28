@@ -182,6 +182,71 @@ def test_ci_ignore_is_case_insensitive():
     assert green is True
 
 
+# --- review_verdict (KGA-337) ------------------------------------------------
+def _rv(state, login="claude[bot]", rid=1, submitted="2026-07-28T10:00:00Z"):
+    return {"user": {"login": login}, "state": state, "id": rid, "submitted_at": submitted}
+
+
+def test_verdict_formal_changes_requested():
+    v, ev = signals.review_verdict([_rv("CHANGES_REQUESTED")], [])
+    assert v == signals.REVIEW_CHANGES_REQUESTED
+    assert ev["source"] == "formal_review"
+
+
+def test_verdict_formal_approved():
+    v, _ = signals.review_verdict([_rv("APPROVED")], [])
+    assert v == signals.REVIEW_APPROVE
+
+
+def test_verdict_formal_commented_carries_no_verdict():
+    # a COMMENTED (or DISMISSED/PENDING) review is not a graded verdict -> none.
+    v, _ = signals.review_verdict([_rv("COMMENTED")], [])
+    assert v == signals.REVIEW_NONE
+
+
+def test_verdict_latest_graded_review_wins():
+    reviews = [
+        _rv("CHANGES_REQUESTED", rid=1, submitted="2026-07-28T10:00:00Z"),
+        _rv("APPROVED", rid=2, submitted="2026-07-28T10:30:00Z"),
+    ]
+    v, _ = signals.review_verdict(reviews, [])
+    assert v == signals.REVIEW_APPROVE
+
+
+def test_verdict_ignores_non_bot_reviews():
+    v, _ = signals.review_verdict([_rv("CHANGES_REQUESTED", login="someone-else")], [])
+    assert v == signals.REVIEW_NONE
+
+
+def test_verdict_marker_request_changes_fallback():
+    comments = [_c("claude[bot]", "blocking findings\n\nVERDICT: REQUEST_CHANGES")]
+    v, ev = signals.review_verdict([], comments)
+    assert v == signals.REVIEW_CHANGES_REQUESTED
+    assert ev["source"] == "comment_marker"
+
+
+def test_verdict_marker_changes_requested_synonym():
+    v, _ = signals.review_verdict([], [_c("claude[bot]", "VERDICT: CHANGES_REQUESTED")])
+    assert v == signals.REVIEW_CHANGES_REQUESTED
+
+
+def test_verdict_marker_approve_fallback():
+    v, _ = signals.review_verdict([], [_c("claude[bot]", "looks good\n\nVERDICT: APPROVE")])
+    assert v == signals.REVIEW_APPROVE
+
+
+def test_verdict_formal_review_takes_priority_over_marker():
+    # a graded formal review is authoritative even if an older comment marker disagrees.
+    v, ev = signals.review_verdict([_rv("APPROVED")], [_c("claude[bot]", "VERDICT: REQUEST_CHANGES")])
+    assert v == signals.REVIEW_APPROVE
+    assert ev["source"] == "formal_review"
+
+
+def test_verdict_none_when_no_review_or_marker():
+    v, _ = signals.review_verdict([], [_c("claude[bot]", "Review complete, good to merge")])
+    assert v == signals.REVIEW_NONE
+
+
 def test_ci_ignore_does_not_over_exclude_names_merely_containing_token():
     # KGA-334 review fix: a caller check whose leaf merely CONTAINS "claude" (e.g.
     # "verify-claude-config") is NOT swept up — only a leaf that IS claude/claude-review is dropped.

@@ -23,8 +23,22 @@ the SHA it is asked about; a green result recorded against any other SHA is irre
 
 from __future__ import annotations
 
+import re
+
 DEFAULT_MERGE_CANDIDATE_LABEL = "merge-candidate"
 DEFAULT_BOT_LOGIN = "claude[bot]"
+
+# The reviewer's explicit verdict on the PR (KGA-337). The gate treats CHANGES_REQUESTED as a hard
+# block, so a blocking @claude review can't be merged just because CI is green and the label is on.
+REVIEW_APPROVE = "approve"
+REVIEW_CHANGES_REQUESTED = "changes_requested"
+REVIEW_NONE = "none"
+
+# A machine-readable verdict marker a comment-only reviewer can emit (the @claude Assistant posts an
+# issue comment, not a formal review), honored as a fallback when no formal review state exists.
+_VERDICT_MARKER = re.compile(r"VERDICT:\s*(APPROVE|REQUEST_CHANGES|CHANGES_REQUESTED)", re.IGNORECASE)
+# Formal GitHub review states that actually carry a verdict (COMMENTED/DISMISSED/PENDING do not).
+_GRADED_STATES = {"APPROVED", "CHANGES_REQUESTED"}
 
 # The @claude PR Assistant edits ONE comment through several shapes before its verdict is final;
 # these phrases mark the not-yet-final placeholders (verified on KGA-134, documented in CLAUDE.md).
@@ -86,6 +100,49 @@ def review_present_and_final(
         "has_pending_checkbox": has_pending_box,
         "is_working_placeholder": is_placeholder,
     }
+
+
+def review_verdict(
+    reviews: list[dict],
+    comments: list[dict],
+    *,
+    bot_login: str = DEFAULT_BOT_LOGIN,
+) -> tuple[str, dict]:
+    """The reviewer's explicit verdict on the PR (KGA-337) — the piece that lets the gate BLOCK on a
+    changes-requested review instead of trusting the label as the only review proxy.
+
+    Two sources, in priority order:
+      1. The latest FORMAL GitHub review by ``bot_login`` — authoritative. Only ``APPROVED`` /
+         ``CHANGES_REQUESTED`` states carry a verdict (``COMMENTED`` / ``DISMISSED`` / ``PENDING`` do
+         not and are skipped).
+      2. Fallback (no graded formal review): a ``VERDICT: APPROVE|REQUEST_CHANGES`` marker in the
+         latest ``bot_login`` issue comment — so the comment-only @claude Assistant can still express
+         a blocking verdict without submitting a formal review.
+
+    Returns ``(verdict, evidence)`` with ``verdict`` one of ``REVIEW_APPROVE`` /
+    ``REVIEW_CHANGES_REQUESTED`` / ``REVIEW_NONE``. ``REVIEW_NONE`` (no explicit verdict from either
+    source) is deliberately NON-blocking on its own — the gate falls back to its other signals — so
+    adding this signal never regresses a repo whose reviewer emits neither a formal review nor a
+    marker; it only ever ADDS the ability to catch an explicit block.
+    """
+    mine = [r for r in reviews or [] if (r.get("user") or {}).get("login") == bot_login]
+    graded = [r for r in mine if (r.get("state") or "").upper() in _GRADED_STATES]
+    if graded:
+        latest = max(graded, key=lambda r: (r.get("submitted_at") or "", r.get("id") or 0))
+        state = (latest.get("state") or "").upper()
+        verdict = REVIEW_CHANGES_REQUESTED if state == "CHANGES_REQUESTED" else REVIEW_APPROVE
+        return verdict, {"verdict": verdict, "source": "formal_review", "review_id": latest.get("id"), "state": state}
+
+    bot_comments = [c for c in comments or [] if (c.get("user") or {}).get("login") == bot_login]
+    if bot_comments:
+        latest_c = max(bot_comments, key=lambda c: (c.get("created_at") or "", c.get("id") or 0))
+        match = _VERDICT_MARKER.search(latest_c.get("body") or "")
+        if match:
+            token = match.group(1).upper()
+            verdict = REVIEW_APPROVE if token == "APPROVE" else REVIEW_CHANGES_REQUESTED
+            return verdict, {"verdict": verdict, "source": "comment_marker", "comment_id": latest_c.get("id"), "marker": token}
+
+    return REVIEW_NONE, {"verdict": REVIEW_NONE, "source": "none"}
 
 
 def ci_green_for_sha(
