@@ -183,3 +183,20 @@ def test_run_red_reopen_callback_invoked_when_provided():
     )
     assert out["linear_reopen"] == "reopened"
     assert reopened and reopened[0][0] == "KGA-204"
+
+
+def test_run_ignores_failing_ai_review_and_stands():
+    # merge-commit CI: real test green + a FAILED claude-review must NOT trigger a revert (KGA-334) —
+    # the poll ignores AI-review runs, so a healthy merge stands.
+    mixed = [
+        {"name": "test", "status": "completed", "conclusion": "success", "head_sha": MERGE_SHA},
+        {"name": "claude-review", "status": "completed", "conclusion": "failure", "head_sha": MERGE_SHA},
+    ]
+    api = FakeApi(checks=[mixed])
+    calls = []
+    out = revert.run(
+        api, "KGA-Life", "kga-x", merge_sha=MERGE_SHA,
+        git_revert_and_push=lambda *a: calls.append(a), sleep=_noop_sleep,
+    )
+    assert out["outcome"] == "stood"
+    assert calls == []

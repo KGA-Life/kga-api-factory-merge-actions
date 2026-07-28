@@ -158,3 +158,24 @@ def test_ci_combined_status_failure_blocks():
 def test_ci_combined_status_success_with_statuses_passes():
     green, _ = signals.ci_green_for_sha([_run("build")], _status(state="success", total=2), SHA)
     assert green is True
+
+
+def test_ci_ignores_ai_review_checks_via_default_list():
+    # a failing/pending AI-review run (claude / claude-review) must NOT gate the deterministic CI
+    # (KGA-334) — only the real test run counts.
+    runs = [
+        _run("lint-and-test"),
+        _run("claude-review", conclusion="failure"),
+        _run("claude", status="in_progress", conclusion=None),
+    ]
+    green, ev = signals.ci_green_for_sha(runs, _status(), SHA, ignore_check_names=signals.AI_REVIEW_CHECK_NAMES)
+    assert green is True
+    assert ev["relevant_run_count"] == 1
+
+
+def test_ci_ignore_is_case_insensitive():
+    green, _ = signals.ci_green_for_sha(
+        [_run("Claude Code Review", conclusion="failure"), _run("test")],
+        _status(), SHA, ignore_check_names=("claude",),
+    )
+    assert green is True

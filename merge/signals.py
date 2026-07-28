@@ -39,6 +39,15 @@ _WORKING_PLACEHOLDERS = (
 # check-run conclusions that count as "not failing" (a green or a deliberately-neutral outcome).
 _OK_CONCLUSIONS = {"success", "neutral", "skipped"}
 
+# AI-review workflows post their OWN check-runs — `claude` (the @claude Assistant, claude.yml) and
+# `claude-review` (the auto-review, claude-code-review.yml). They are advisory and can fail or stall
+# independently of the code (the auto-review currently fails on every PR — KGA-335), so they must
+# NOT gate the deterministic CI-green signal: otherwise a red/pending review blocks a valid merge,
+# and the post-merge auto-revert would fire on a healthy merge. The single substring token `claude`
+# catches both names (matched case-insensitively). Callers pass this to ``ci_green_for_sha`` via
+# ``ignore_check_names``. (KGA-334)
+AI_REVIEW_CHECK_NAMES = ("claude",)
+
 
 def merge_candidate_labeled(
     labels: list[dict], *, label_name: str = DEFAULT_MERGE_CANDIDATE_LABEL
@@ -93,18 +102,19 @@ def ci_green_for_sha(
       * the legacy combined commit-status, IF any statuses exist, is ``success`` (Actions report as
         check-runs so this is usually empty; when empty it is not consulted).
 
-    ``ignore_check_names`` drops runs whose name CONTAINS any given token (a substring match, not
-    exact — e.g. the post-merge-verify workflow's own run, whose check-run name is the job id on the
-    dispatch path but may be composed as ``<caller> / post-merge-verify`` on the ``workflow_call``
-    path; the substring match catches both, so it doesn't wait on itself). Runs whose ``head_sha``
-    is present and != ``sha`` are dropped as stale — the VG-4 guard: a green on a superseded SHA
-    never counts.
+    ``ignore_check_names`` drops runs whose name CONTAINS any given token (a **case-insensitive**
+    substring match, not exact) — e.g. the post-merge-verify workflow's own run (whose check-run
+    name is the job id on the dispatch path but may be composed as ``<caller> / post-merge-verify``
+    on the ``workflow_call`` path), and the AI-review runs (``AI_REVIEW_CHECK_NAMES``). Runs whose
+    ``head_sha`` is present and != ``sha`` are dropped as stale — the VG-4 guard: a green on a
+    superseded SHA never counts.
     """
+    lowered_ignore = tuple(tok.lower() for tok in ignore_check_names)
     relevant = []
     stale_dropped = 0
     for run in check_runs or []:
         name = run.get("name") or ""
-        if any(tok in name for tok in ignore_check_names):
+        if any(tok in name.lower() for tok in lowered_ignore):
             continue
         run_sha = run.get("head_sha")
         if run_sha and run_sha != sha:
