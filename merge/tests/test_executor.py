@@ -177,3 +177,16 @@ def test_main_prints_outcome(monkeypatch, capsys):
     rc = executor.main(["--owner", "KGA-Life", "--repo", "kga-x", "--pr", "7", "--dry-run"])
     assert rc == 0
     assert "would_merge" in capsys.readouterr().out
+
+
+def test_failing_ai_review_does_not_block_merge():
+    # a FAILED claude-review check alongside a green lint-and-test must not block the gate (KGA-334):
+    # the executor passes AI_REVIEW_CHECK_NAMES to ci_green_for_sha, so only the real CI counts.
+    mixed = [
+        _green(A)[0],
+        {"name": "claude-review", "status": "completed", "conclusion": "failure", "head_sha": A},
+    ]
+    api = FakeApi(pulls=[_open_pr(A), _open_pr(A)], checks=[mixed, mixed], statuses=[_empty_status(), _empty_status()])
+    out = _run(api)
+    assert out["outcome"] == "merged"
+    assert api.merge_calls == [{"sha": A, "merge_method": "merge"}]

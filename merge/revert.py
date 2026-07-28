@@ -120,9 +120,13 @@ def run(
     sleep=time.sleep,
 ) -> dict:
     """Verify ``main`` on the merge commit and auto-revert if red. Returns a structured outcome."""
+    # Exclude BOTH this workflow's own run (VERIFY_CHECK_NAME) AND the AI-review runs — otherwise the
+    # always-failing `claude-review` check would make the post-merge poll read a healthy merge as red
+    # and auto-revert it (KGA-334). Only the deterministic CI decides.
     green, ci_ev = _poll_ci(
         api, owner, repo, merge_sha,
-        ignore=(VERIFY_CHECK_NAME,), sleep=sleep, self_run_id=os.environ.get("GITHUB_RUN_ID"),
+        ignore=(VERIFY_CHECK_NAME, *signals.AI_REVIEW_CHECK_NAMES),
+        sleep=sleep, self_run_id=os.environ.get("GITHUB_RUN_ID"),
     )
     branch = revert_branch_name(merge_sha)
     existing = _existing_revert(api, owner, repo, branch)

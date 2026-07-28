@@ -138,9 +138,9 @@ def test_ci_ignore_check_names_excludes_own_run():
     assert green is True
 
 
-def test_ci_ignore_matches_composed_name_substring():
+def test_ci_ignore_matches_composed_leaf_name():
     # on the workflow_call path the self run's name may be composed (e.g. "<caller> /
-    # post-merge-verify"); the substring match must still exclude it.
+    # post-merge-verify"); the LEAF (part after the last "/") must still match and exclude it.
     green, _ = signals.ci_green_for_sha(
         [_run("build / post-merge-verify", status="in_progress", conclusion=None), _run("test")],
         _status(),
@@ -158,3 +158,37 @@ def test_ci_combined_status_failure_blocks():
 def test_ci_combined_status_success_with_statuses_passes():
     green, _ = signals.ci_green_for_sha([_run("build")], _status(state="success", total=2), SHA)
     assert green is True
+
+
+def test_ci_ignores_ai_review_checks_via_default_list():
+    # a failing/pending AI-review run (claude / claude-review) must NOT gate the deterministic CI
+    # (KGA-334) — only the real test run counts.
+    runs = [
+        _run("lint-and-test"),
+        _run("claude-review", conclusion="failure"),
+        _run("claude", status="in_progress", conclusion=None),
+    ]
+    green, ev = signals.ci_green_for_sha(runs, _status(), SHA, ignore_check_names=signals.AI_REVIEW_CHECK_NAMES)
+    assert green is True
+    assert ev["relevant_run_count"] == 1
+
+
+def test_ci_ignore_is_case_insensitive():
+    # a case variant of a real check name (leaf "claude-review") is still excluded.
+    green, _ = signals.ci_green_for_sha(
+        [_run("Claude-Review", conclusion="failure"), _run("test")],
+        _status(), SHA, ignore_check_names=("claude-review",),
+    )
+    assert green is True
+
+
+def test_ci_ignore_does_not_over_exclude_names_merely_containing_token():
+    # KGA-334 review fix: a caller check whose leaf merely CONTAINS "claude" (e.g.
+    # "verify-claude-config") is NOT swept up — only a leaf that IS claude/claude-review is dropped.
+    # So a FAILING "verify-claude-config" run keeps CI red (it is a real check, not AI-review noise).
+    green, ev = signals.ci_green_for_sha(
+        [_run("verify-claude-config", conclusion="failure"), _run("test")],
+        _status(), SHA, ignore_check_names=signals.AI_REVIEW_CHECK_NAMES,
+    )
+    assert green is False
+    assert "verify-claude-config" in ev["failed_runs"]

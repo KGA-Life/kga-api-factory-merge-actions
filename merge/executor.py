@@ -32,6 +32,12 @@ from .github_api import GitHubApi, GitHubError
 
 MERGE_CANDIDATE_LABEL = os.environ.get("MERGE_CANDIDATE_LABEL", signals.DEFAULT_MERGE_CANDIDATE_LABEL)
 CLAUDE_BOT_LOGIN = os.environ.get("CLAUDE_BOT_LOGIN", signals.DEFAULT_BOT_LOGIN)
+# Check-run names EXCLUDED from the hard CI-green signal — the AI-review runs (`claude`,
+# `claude-review`), which are advisory and can fail/stall independently of the code (KGA-334). Only
+# the deterministic test/lint/build CI gates the merge. Override via a comma-separated env var.
+IGNORE_CHECK_NAMES = tuple(
+    n.strip() for n in os.environ.get("MERGE_IGNORE_CHECK_NAMES", "").split(",") if n.strip()
+) or signals.AI_REVIEW_CHECK_NAMES
 
 
 def _gather_signals(api: GitHubApi, owner: str, repo: str, number: int, sha: str, labels: list[dict]) -> dict:
@@ -45,6 +51,7 @@ def _gather_signals(api: GitHubApi, owner: str, repo: str, number: int, sha: str
         api.list_check_runs(owner, repo, sha),
         api.get_combined_status(owner, repo, sha),
         sha,
+        ignore_check_names=IGNORE_CHECK_NAMES,
     )
     return {
         "review_greenlit": labeled and review_final,
@@ -108,6 +115,7 @@ def run(
         api.list_check_runs(owner, repo, current_sha),
         api.get_combined_status(owner, repo, current_sha),
         current_sha,
+        ignore_check_names=IGNORE_CHECK_NAMES,
     )
     if not ci_green_now:
         verdict["reasons"].append("CI not green on the current head SHA at merge time")
