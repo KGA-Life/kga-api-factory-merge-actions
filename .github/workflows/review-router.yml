@@ -1,0 +1,67 @@
+name: review-router
+
+# T33 review-outcome router — the GREENLIGHT arm (KGA-176) + un-greenlight (KGA-337). Turns a clean
+# @claude review (VERDICT: APPROVE) into the `merge-candidate` label the T43 gate consumes, and
+# removes the label on a blocking review (VERDICT: REQUEST_CHANGES). Reuses the SAME verdict logic the
+# gate reads (merge.signals.review_verdict), so producer and consumer never diverge.
+#
+# CRITICAL WIRING (mirrors T47's merge_token requirement): the label is applied by a REAL actor (the
+# `merge_token` PAT), NOT the built-in github-actions[bot] token — GitHub does NOT fire workflows
+# (here: merge-gate.yml on `pull_request: labeled`) for events caused by the built-in token, so
+# without the PAT the label lands but the gate never runs (bring-up fallback = manual re-fire). With
+# the PAT, applying `merge-candidate` fires the gate and the merge proceeds hands-free.
+#
+#   * workflow_call     — PRODUCTION: a generated repo calls this on its own @claude-review-comment
+#                         events. `github.*` then resolves to the CALLER (target) repo.
+#   * workflow_dispatch — bring-up / dogfood against an explicit {owner, repo, pr}; defaults to
+#                         --dry-run (evaluate the label action, do NOT apply it).
+#
+# Version pinning via `machinery_ref` matches merge-gate.yml / post-merge-verify.yml.
+
+on:
+  workflow_call:
+    inputs:
+      owner: { required: false, type: string, default: '' }
+      repo: { required: false, type: string, default: '' }
+      pr: { required: true, type: string }
+      dry_run: { required: false, type: boolean, default: false }
+      machinery_ref: { required: false, type: string, default: main }
+    secrets:
+      merge_token: { required: false }
+  workflow_dispatch:
+    inputs:
+      owner: { required: true, type: string }
+      repo: { required: true, type: string }
+      pr: { required: true, type: string }
+      dry_run: { type: boolean, default: true }
+      machinery_ref: { type: string, default: main }
+
+permissions:
+  issues: write # add/remove the merge-candidate label (labels are the issues API)
+  pull-requests: write # post the greenlight / un-greenlight audit comment
+  checks: read # read check-runs for the CI-green pre-check
+  statuses: read # read the legacy combined commit status
+
+jobs:
+  route:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the merge machinery
+        uses: actions/checkout@v4
+        with:
+          repository: KGA-Life/kga-api-factory-merge-actions
+          ref: ${{ inputs.machinery_ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Route review outcome -> merge-candidate label
+        env:
+          GITHUB_TOKEN: ${{ secrets.merge_token || github.token }}
+          PYTHONIOENCODING: utf-8
+        run: |
+          OWNER="${{ inputs.owner }}"; [ -z "$OWNER" ] && OWNER="${{ github.repository_owner }}"
+          REPO="${{ inputs.repo }}"; [ -z "$REPO" ] && REPO="${{ github.event.repository.name }}"
+          ARGS="--owner $OWNER --repo $REPO --pr ${{ inputs.pr }}"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          echo "review-router: $ARGS"
+          python -m merge.router $ARGS

@@ -14,17 +14,22 @@ driven by two reusable GitHub Actions workflows. No AWS, no third-party deps.
 
 | Module | Kind | Role |
 |---|---|---|
-| `signals.py` | pure | Derive the three gate signals from GitHub payloads. `ci_green_for_sha` is the hard signal and owns the **stale-SHA guard** (a green on any other SHA never counts). `review_present_and_final` reuses the KGA-134 `claude[bot]`-review completion heuristic. |
+| `signals.py` | pure | Derive the gate signals from GitHub payloads. `ci_green_for_sha` is the hard signal and owns the **stale-SHA guard** (a green on any other SHA never counts). `review_present_and_final` reuses the KGA-134 `claude[bot]`-review completion heuristic. `review_verdict` (KGA-337) reads the reviewer's explicit **APPROVE / REQUEST_CHANGES** verdict — a formal review state, or a `VERDICT:` marker in the review comment — with a stale-review guard. |
 | `gate.py` | pure | `evaluate_gate` — the three-signal AND. Authorises **only** when all three hold; lists every missing signal otherwise. Decides *whether*, never touches the branch. |
-| `executor.py` | thin | T34 — the non-Claude-Code merge actor. Gathers signals, evaluates the gate, and — the load-bearing bit — **re-reads the head SHA and re-checks CI-green immediately before merging**, refusing on a moved head or non-green re-check. Merges via REST (`merge` method) with the `sha` param as a server-side backstop. |
+| `router.py` | pure + thin | T33 greenlight / un-greenlight (KGA-176 / KGA-337). `decide_route` maps the review verdict to a label action; `run` applies `merge-candidate` on a clean review (`APPROVE` + CI-green on the head SHA) and removes it on a blocking one (`REQUEST_CHANGES`), so the label the gate consumes stays a faithful proxy of the review outcome. The **producer** of the label the gate is the consumer of. |
+| `executor.py` | thin | T34 — the non-Claude-Code merge actor. Gathers signals, evaluates the gate (now including `review_verdict` — a `REQUEST_CHANGES` verdict is a hard block even with the label on), and — the load-bearing bit — **re-reads the head SHA and re-checks CI-green immediately before merging**, refusing on a moved head or non-green re-check. Merges via REST (`merge` method) with the `sha` param as a server-side backstop. |
 | `revert.py` | pure + thin | T47 — post-merge verify + auto-revert. Polls CI on the merge commit (excluding its own run), and on red opens+merges a revert PR, **idempotent on the merge SHA**. |
-| `github_api.py` | thin I/O | The only module that touches the network (stdlib `urllib`). Injected into `executor`/`revert` so the logic unit-tests with no network. |
+| `github_api.py` | thin I/O | The only module that touches the network (stdlib `urllib`). Injected into `router`/`executor`/`revert` so the logic unit-tests with no network. |
 
 ## The contract with the rest of the loop
 
-- **Upstream (T33 routing).** A clean `@claude` review + met acceptance criteria is asserted by the
-  T33 router applying the **`merge-candidate` label**. The gate reads that label as signals (i)+(ii),
-  and independently confirms a `claude[bot]` review actually *ran and finished* (defense-in-depth).
+- **Upstream (T33 routing).** The **`router.py` / `review-router.yml`** step applies the
+  **`merge-candidate` label** automatically on a clean `@claude` review (verdict `APPROVE` + CI-green)
+  and removes it on a blocking one (`REQUEST_CHANGES`). The gate reads that label as signals (i)+(ii),
+  independently confirms a `claude[bot]` review *ran and finished* (defense-in-depth), and **also reads
+  the verdict directly and denies on `REQUEST_CHANGES`** (KGA-337), so a blocking review can't be
+  merged even if the label is stale. The router applies the label with the `merge_token` PAT so the
+  label event actually fires `merge-gate.yml` (a `github-actions[bot]` label write would not).
 - **Signal (iii)** is CI-green on the PR head SHA — the one hard, deterministic input, re-checked at
   merge time.
 - **Linear transition.** The executor never sets the issue Done — the PR's `Closes KGA-###` keyword
@@ -34,6 +39,9 @@ driven by two reusable GitHub Actions workflows. No AWS, no third-party deps.
 
 ## Workflows
 
+- `.github/workflows/review-router.yml` — T33. Called from the generated repo's `issue_comment`
+  (claude[bot] review) events + `workflow_dispatch` (dogfood; defaults to `--dry-run`). Applies /
+  removes `merge-candidate` via the `merge_token` PAT so the label event fires `merge-gate.yml`.
 - `.github/workflows/merge-gate.yml` — T43+T34. `workflow_call` (the M2 template wires a thin caller
   at T35) + `workflow_dispatch` (dogfood; defaults to `--dry-run`).
 - `.github/workflows/post-merge-verify.yml` — T47. Called from the generated repo's push-to-main
