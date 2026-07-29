@@ -79,6 +79,10 @@ def _red(sha):
     return [{"name": "lint-and-test", "status": "completed", "conclusion": "failure", "head_sha": sha}]
 
 
+def _pending(sha):
+    return [{"name": "lint-and-test", "status": "in_progress", "conclusion": None, "head_sha": sha}]
+
+
 def _empty_status():
     return {"state": "pending", "total_count": 0}
 
@@ -181,6 +185,42 @@ def test_run_ai_review_check_does_not_block_greenlight():
     out = _run(api)
     assert out["action"] == router.ACTION_APPLY
     assert api.added == [["merge-candidate"]]
+
+
+def test_run_poll_retries_until_ci_settles_then_greenlights():
+    # exercise the bounded poll's load-bearing retry: CI is pending on the first look and green on the
+    # next. The router must poll again (not give up on the first pending read) and then greenlight,
+    # sleeping between attempts.
+    class PollApi(FakeApi):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.check_calls = 0
+
+        def list_check_runs(self, o, r, sha):
+            seq = [_pending(A), _green(A)]
+            out = seq[min(self.check_calls, len(seq) - 1)]
+            self.check_calls += 1
+            return out
+
+    slept: list = []
+    api = PollApi(pull=_open_pr(labeled=False), comments=_approve_comment())
+    out = router.run(api, "KGA-Life", "kga-x", 7, sleep=lambda s: slept.append(s))
+    assert out["action"] == router.ACTION_APPLY
+    assert api.check_calls >= 2  # polled again after the first pending read
+    assert len(slept) >= 1  # slept between attempts
+    assert api.added == [["merge-candidate"]]
+
+
+def test_run_poll_times_out_pending_does_not_greenlight():
+    # if CI never settles within the attempt budget, the router must NOT greenlight (fail-safe).
+    class PendingApi(FakeApi):
+        def list_check_runs(self, o, r, sha):
+            return _pending(A)
+
+    api = PendingApi(pull=_open_pr(labeled=False), comments=_approve_comment())
+    out = router.run(api, "KGA-Life", "kga-x", 7, sleep=lambda _s: None)
+    assert out["action"] == router.ACTION_NONE
+    assert api.added == []
 
 
 def test_run_dry_run_does_not_apply():

@@ -127,10 +127,12 @@ def run(
     )
 
     # CI only gates the APPLY path; a block (REMOVE) doesn't care about CI, so don't burn a poll on it.
-    if verdict == signals.REVIEW_APPROVE and not labeled:
+    # Also require review_final: decide_route rejects APPLY when the review isn't final regardless of
+    # CI, so polling in that case (e.g. an APPROVE marker in a not-yet-final comment) is wasted work.
+    if verdict == signals.REVIEW_APPROVE and not labeled and review_final:
         ci_green, ci_ev = _poll_ci_green(api, owner, repo, head_sha, sleep=sleep)
     else:
-        ci_green, ci_ev = False, {"skipped": "CI pre-check only runs for an approve-and-unlabelled PR"}
+        ci_green, ci_ev = False, {"skipped": "CI pre-check only runs for an approve + review-final + unlabelled PR"}
 
     decision = decide_route(verdict=verdict, review_final=review_final, ci_green=ci_green, labeled=labeled)
     evidence = {
