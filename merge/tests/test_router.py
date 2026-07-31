@@ -266,9 +266,24 @@ def test_run_escape_hatch_trips_over_cap_and_ungreenlights(monkeypatch):
     out = _run(api)
     assert out["outcome"] == router.ACTION_ESCAPE_HATCH
     assert out["rounds"]["count"] == 3 and out["rounds"]["cap"] == 2
+    assert out["commented"] is True
     assert api.removed == ["merge-candidate"]
     assert api.added == []
     assert len(api.comments_posted) == 1 and "escape hatch tripped" in api.comments_posted[0].lower()
+
+
+def test_run_escape_hatch_does_not_repost_when_already_flagged(monkeypatch):
+    # The router runs on every review event; once a PR is flagged, a re-trip must NOT bury it in
+    # duplicate audit comments. The un-greenlight stays idempotent regardless.
+    monkeypatch.setattr(router, "MAX_REVIEW_ROUNDS", 2)
+    prior = _comment(f"🛑 {router._ESCAPE_HATCH_MARKER}. earlier trip",
+                     login="github-actions[bot]", cid=99, created="2026-07-28T11:00:00Z")
+    api = FakeApi(pull=_open_pr(labeled=True), comments=_n_verdict_comments(3) + [prior], checks=_green(A))
+    out = _run(api)
+    assert out["outcome"] == router.ACTION_ESCAPE_HATCH
+    assert out["commented"] is False        # no duplicate audit comment posted
+    assert api.comments_posted == []
+    assert api.removed == ["merge-candidate"]  # un-greenlight still applied
 
 
 def test_run_escape_hatch_trips_when_unlabeled_still_comments(monkeypatch):

@@ -126,8 +126,10 @@ def review_verdict(
     adding this signal never regresses a repo whose reviewer emits neither a formal review nor a
     marker; it only ever ADDS the ability to catch an explicit block.
     """
-    mine = [r for r in reviews or [] if (r.get("user") or {}).get("login") == bot_login]
-    graded = [r for r in mine if (r.get("state") or "").upper() in _GRADED_STATES]
+    # Shares the graded-review definition with the review-rounds bound (``merge.bounds``) via the one
+    # ``is_bot_graded_review`` predicate, so "a graded bot review" means the same thing to the verdict
+    # and to the round counter.
+    graded = [r for r in reviews or [] if is_bot_graded_review(r, bot_login=bot_login)]
 
     # VG-4-style staleness guard: a formal review is bound to a commit (``commit_id``); once head
     # moves past it, it no longer speaks to the current code. When a ``head_sha`` is supplied, drop

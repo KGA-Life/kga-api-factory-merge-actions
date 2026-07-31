@@ -146,7 +146,7 @@ def run(
             api, owner, repo, number,
             labeled=labeled, verdict=verdict, rounds_verdict=rounds_verdict,
             evidence={"label": label_ev, "review": review_ev, "review_verdict": verdict_ev, "head_sha": head_sha},
-            dry_run=dry_run,
+            comments=comments, dry_run=dry_run,
         )
 
     # CI only gates the APPLY path; a block (REMOVE) doesn't care about CI, so don't burn a poll on it.
@@ -180,6 +180,12 @@ def run(
     return result
 
 
+# Stable headline in the escape-hatch audit comment; ALSO the idempotence key — a prior comment
+# carrying it means this PR was already flagged, so we don't re-post a near-identical trip comment on
+# every subsequent router run (the un-greenlight itself stays idempotent regardless).
+_ESCAPE_HATCH_MARKER = "Runaway escape hatch tripped (T38)"
+
+
 def _escape_hatch(
     api: GitHubApi,
     owner: str,
@@ -190,13 +196,18 @@ def _escape_hatch(
     verdict: str,
     rounds_verdict: dict,
     evidence: dict,
+    comments: list[dict],
     dry_run: bool,
 ) -> dict:
     """The T38 runaway escape hatch (KGA-181): the fix↔review loop has exceeded its round budget without
     converging. Withdraw ``merge-candidate`` if present (a runaway PR must not stay a merge candidate)
     and post an audit comment flagging the build for human help rather than looping unbounded. Returns a
     structured ``escape_hatch`` outcome carrying the bound decision — the auditable trip record the
-    T39/T51 layer surfaces to Slack (the Slack delivery itself is deferred to T39, soft-coupled)."""
+    T39/T51 layer surfaces to Slack (the Slack delivery itself is deferred to T39, soft-coupled).
+
+    Idempotent on the COMMENT: the router runs on every review event, so once a PR is flagged we do not
+    re-post a near-identical trip comment each run (that would bury the PR in duplicates while it waits
+    for a human). ``commented`` in the result records whether a NEW audit comment was posted this run."""
     result = {
         "outcome": ACTION_ESCAPE_HATCH,
         "action": ACTION_ESCAPE_HATCH,
@@ -204,23 +215,27 @@ def _escape_hatch(
         "reason": rounds_verdict["reason"],
         "rounds": rounds_verdict,
         "evidence": evidence,
+        "commented": False,
     }
     if dry_run:
         result["outcome"] = "would_escape_hatch"
         return result
     if labeled:
         api.remove_label(owner, repo, number, MERGE_CANDIDATE_LABEL)
-    _comment(api, owner, repo, number, _render_escape_hatch(rounds_verdict, verdict))
+    already_flagged = any(_ESCAPE_HATCH_MARKER in (c.get("body") or "") for c in comments or [])
+    if not already_flagged:
+        _comment(api, owner, repo, number, _render_escape_hatch(rounds_verdict, verdict))
+        result["commented"] = True
     return result
 
 
 def _render_escape_hatch(rounds_verdict: dict, verdict: str) -> str:
     return (
-        f"🛑 **Runaway escape hatch tripped (T38).** The fix↔review cycle has run "
+        f"🛑 **{_ESCAPE_HATCH_MARKER}.** The fix↔review cycle has run "
         f"{rounds_verdict['count']} review round(s) — over the cap of {rounds_verdict['cap']} — without "
         f"converging to a clean approval (latest verdict: `{verdict}`). The `{MERGE_CANDIDATE_LABEL}` "
         f"label is withheld/withdrawn and this build is flagged for human help rather than looping "
-        f"unbounded. Review will keep tripping the hatch until a human intervenes or the cap is raised."
+        f"unbounded. The hatch stays tripped until a human intervenes or the cap is raised."
     )
 
 
