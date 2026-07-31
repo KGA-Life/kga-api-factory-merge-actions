@@ -126,8 +126,10 @@ def review_verdict(
     adding this signal never regresses a repo whose reviewer emits neither a formal review nor a
     marker; it only ever ADDS the ability to catch an explicit block.
     """
-    mine = [r for r in reviews or [] if (r.get("user") or {}).get("login") == bot_login]
-    graded = [r for r in mine if (r.get("state") or "").upper() in _GRADED_STATES]
+    # Shares the graded-review definition with the review-rounds bound (``merge.bounds``) via the one
+    # ``is_bot_graded_review`` predicate, so "a graded bot review" means the same thing to the verdict
+    # and to the round counter.
+    graded = [r for r in reviews or [] if is_bot_graded_review(r, bot_login=bot_login)]
 
     # VG-4-style staleness guard: a formal review is bound to a commit (``commit_id``); once head
     # moves past it, it no longer speaks to the current code. When a ``head_sha`` is supplied, drop
@@ -162,6 +164,25 @@ def review_verdict(
             return verdict, {"verdict": verdict, "source": "comment_marker", "comment_id": latest_c.get("id"), "marker": token, "stale_reviews_dropped": stale_dropped}
 
     return REVIEW_NONE, {"verdict": REVIEW_NONE, "source": "none", "stale_reviews_dropped": stale_dropped}
+
+
+def is_bot_verdict_comment(comment: dict, *, bot_login: str = DEFAULT_BOT_LOGIN) -> bool:
+    """True iff ``comment`` is a ``bot_login`` issue comment carrying a ``VERDICT:`` marker — i.e. one
+    completed review round from the comment-only @claude Assistant. The single source of truth for
+    "this comment is a review verdict", reused by the review-rounds bound (``merge.bounds``) so the
+    round counter and the gate's verdict logic never diverge."""
+    return (comment.get("user") or {}).get("login") == bot_login and bool(
+        _VERDICT_MARKER.search(comment.get("body") or "")
+    )
+
+
+def is_bot_graded_review(review: dict, *, bot_login: str = DEFAULT_BOT_LOGIN) -> bool:
+    """True iff ``review`` is a GRADED (``APPROVED`` / ``CHANGES_REQUESTED``) formal review by
+    ``bot_login`` — a completed review round via the formal-review path (``COMMENTED`` / ``DISMISSED`` /
+    ``PENDING`` do not carry a verdict and are excluded). Companion to ``is_bot_verdict_comment``."""
+    return (review.get("user") or {}).get("login") == bot_login and (
+        review.get("state") or ""
+    ).upper() in _GRADED_STATES
 
 
 def ci_green_for_sha(
