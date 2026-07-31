@@ -247,6 +247,69 @@ def test_run_skips_closed_pr():
     assert api.added == []
 
 
+# --- T38 runaway escape hatch (review-rounds) --------------------------------
+def _n_verdict_comments(n, *, marker="REQUEST_CHANGES", last=None):
+    """n claude[bot] verdict comments with increasing id/created_at; ``last`` overrides the final
+    comment's marker (so the latest verdict can differ from the earlier churn)."""
+    out = []
+    for i in range(1, n + 1):
+        m = last if (last and i == n) else marker
+        out.append(_comment(f"round {i}. VERDICT: {m}", cid=i, created=f"2026-07-28T10:{i:02d}:00Z"))
+    return out
+
+
+def test_run_escape_hatch_trips_over_cap_and_ungreenlights(monkeypatch):
+    # 3 blocking review rounds with a cap of 2 -> the loop is not converging -> TRIP: withdraw the
+    # merge-candidate label and post the escape-hatch audit comment (not the ordinary un-greenlight).
+    monkeypatch.setattr(router, "MAX_REVIEW_ROUNDS", 2)
+    api = FakeApi(pull=_open_pr(labeled=True), comments=_n_verdict_comments(3), checks=_green(A))
+    out = _run(api)
+    assert out["outcome"] == router.ACTION_ESCAPE_HATCH
+    assert out["rounds"]["count"] == 3 and out["rounds"]["cap"] == 2
+    assert api.removed == ["merge-candidate"]
+    assert api.added == []
+    assert len(api.comments_posted) == 1 and "escape hatch tripped" in api.comments_posted[0].lower()
+
+
+def test_run_escape_hatch_trips_when_unlabeled_still_comments(monkeypatch):
+    # Over the cap + blocking, but no label present: the trip still fires (audit comment) — there's just
+    # no label to withdraw. The point is to flag the runaway, not only to un-greenlight.
+    monkeypatch.setattr(router, "MAX_REVIEW_ROUNDS", 2)
+    api = FakeApi(pull=_open_pr(labeled=False), comments=_n_verdict_comments(3), checks=_green(A))
+    out = _run(api)
+    assert out["outcome"] == router.ACTION_ESCAPE_HATCH
+    assert api.removed == [] and api.added == []
+    assert len(api.comments_posted) == 1 and "escape hatch" in api.comments_posted[0].lower()
+
+
+def test_run_no_escape_hatch_when_slow_but_converged_approve(monkeypatch):
+    # Over the cap in raw round count, but the LATEST verdict is a clean APPROVE — the loop converged
+    # (slowly). Do NOT trip; fall through to the normal greenlight.
+    monkeypatch.setattr(router, "MAX_REVIEW_ROUNDS", 2)
+    api = FakeApi(pull=_open_pr(labeled=False), comments=_n_verdict_comments(3, last="APPROVE"), checks=_green(A))
+    out = _run(api)
+    assert out["action"] == router.ACTION_APPLY
+    assert api.added == [["merge-candidate"]]
+    assert all("escape hatch" not in c.lower() for c in api.comments_posted)
+
+
+def test_run_no_escape_hatch_within_cap(monkeypatch):
+    # Exactly at the cap (2 rounds, cap 2) is still in-bounds (exceeded iff count > cap) -> no trip.
+    monkeypatch.setattr(router, "MAX_REVIEW_ROUNDS", 2)
+    api = FakeApi(pull=_open_pr(labeled=True), comments=_n_verdict_comments(2), checks=_green(A))
+    out = _run(api)
+    assert out["outcome"] != router.ACTION_ESCAPE_HATCH  # blocking within cap -> ordinary un-greenlight
+    assert out["action"] == router.ACTION_REMOVE
+
+
+def test_run_escape_hatch_dry_run_does_not_mutate(monkeypatch):
+    monkeypatch.setattr(router, "MAX_REVIEW_ROUNDS", 2)
+    api = FakeApi(pull=_open_pr(labeled=True), comments=_n_verdict_comments(3), checks=_green(A))
+    out = _run(api, dry_run=True)
+    assert out["outcome"] == "would_escape_hatch"
+    assert api.removed == [] and api.comments_posted == []
+
+
 def test_main_prints_outcome(monkeypatch, capsys):
     api = FakeApi(pull=_open_pr(labeled=False), comments=_approve_comment(), checks=_green(A))
     monkeypatch.setattr(router, "GitHubApi", lambda *a, **k: api)

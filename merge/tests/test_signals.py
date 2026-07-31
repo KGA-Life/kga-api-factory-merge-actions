@@ -288,3 +288,26 @@ def test_ci_ignore_does_not_over_exclude_names_merely_containing_token():
     )
     assert green is False
     assert "verify-claude-config" in ev["failed_runs"]
+
+
+# --- is_bot_verdict_comment / is_bot_graded_review (T38 review-round predicates) ----------------
+def test_is_bot_verdict_comment_true_for_marked_bot_comment():
+    assert signals.is_bot_verdict_comment(_c("claude[bot]", "LGTM. VERDICT: APPROVE")) is True
+
+
+def test_is_bot_verdict_comment_false_without_marker_or_wrong_author():
+    assert signals.is_bot_verdict_comment(_c("claude[bot]", "still working, no verdict")) is False
+    assert signals.is_bot_verdict_comment(_c("octocat", "VERDICT: APPROVE")) is False
+
+
+def test_is_bot_verdict_comment_honours_custom_bot_login():
+    c = _c("reviewer[bot]", "VERDICT: REQUEST_CHANGES")
+    assert signals.is_bot_verdict_comment(c) is False
+    assert signals.is_bot_verdict_comment(c, bot_login="reviewer[bot]") is True
+
+
+def test_is_bot_graded_review_true_only_for_graded_bot_states():
+    assert signals.is_bot_graded_review(_rv("APPROVED")) is True
+    assert signals.is_bot_graded_review(_rv("CHANGES_REQUESTED")) is True
+    assert signals.is_bot_graded_review(_rv("COMMENTED")) is False  # not a graded verdict
+    assert signals.is_bot_graded_review(_rv("APPROVED", login="octocat")) is False  # not the bot
