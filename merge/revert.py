@@ -151,7 +151,22 @@ def run(
     # KGA-395: squash-merge the revert too, so the fix lands as a GitHub-signed (Verified) commit on
     # the default branch — the locally-created `git revert` commit is unsigned, and squashing keeps it
     # off `main`. Then delete the revert branch so that unsigned commit doesn't linger.
-    merged = api.merge_pull(owner, repo, revert_pr["number"], sha=revert_head, merge_method="squash")
+    try:
+        merged = api.merge_pull(owner, repo, revert_pr["number"], sha=revert_head, merge_method="squash")
+    except GitHubError as exc:
+        # The revert PR was opened but GitHub refused to merge it (e.g. 405 = squash disabled on the
+        # repo, 409 = head moved). Do NOT let this propagate: an uncaught throw would leave the revert
+        # PR open-but-unmerged, and because `_existing_revert` counts an OPEN revert PR as "already
+        # handled", every later post-merge-verify run for this merge_sha would no-op — `main` would stay
+        # red with no retry, silently. Surface it as a structured, visible outcome instead (mirrors
+        # executor.run's `merge_refused`); the open revert PR is left for a human to complete.
+        print(f"[merge:revert] revert PR #{revert_pr.get('number')} merge refused: {exc}")
+        return {
+            "outcome": "revert_merge_refused",
+            **outcome,
+            "revert_pr": revert_pr.get("number"),
+            "status": exc.status,
+        }
     _delete_revert_branch(api, owner, repo, branch)
 
     reopen = _reopen(issue_id, merge_sha, reopen_issue)

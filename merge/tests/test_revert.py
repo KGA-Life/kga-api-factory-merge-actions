@@ -4,6 +4,7 @@ injected callable and the API is a fake."""
 from __future__ import annotations
 
 from merge import revert
+from merge.github_api import GitHubError
 
 MERGE_SHA = "deadbeefcafe0000"
 BRANCH = revert.revert_branch_name(MERGE_SHA)  # revert/deadbeefcafe
@@ -14,11 +15,12 @@ def _noop_sleep(_):
 
 
 class FakeApi:
-    def __init__(self, *, checks, statuses=None, pulls=None, revert_pr=None):
+    def __init__(self, *, checks, statuses=None, pulls=None, revert_pr=None, merge_error=None):
         self._checks = list(checks)
         self._statuses = list(statuses or [{"state": "pending", "total_count": 0}])
         self._pulls = pulls or []
         self._revert_pr = revert_pr or {"number": 99, "head": {"sha": "revsha"}}
+        self._merge_error = merge_error
         self.created_pulls: list[str] = []
         self.merge_calls: list = []
         self.deleted_refs: list[str] = []
@@ -43,6 +45,8 @@ class FakeApi:
         return self._revert_pr
 
     def merge_pull(self, o, r, n, *, sha, merge_method="merge"):
+        if self._merge_error:
+            raise self._merge_error
         self.merge_calls.append((n, sha, merge_method))
         return {"sha": "revmergecommit"}
 
@@ -176,6 +180,23 @@ def test_run_red_reverts_and_merges_and_annotates():
     assert api.deleted_refs == [BRANCH]                   # ...and its branch cleaned up afterwards
     assert out["linear_reopen"] == "skipped_no_token"      # no Linear callback wired
     assert api.comments and api.comments[0][0] == 7        # original PR annotated
+
+
+def test_run_red_revert_merge_refused_is_structured_not_raised():
+    # KGA-395 follow-up: if GitHub refuses the revert PR's squash-merge (e.g. 405 squash disabled),
+    # the run must NOT raise — it surfaces a structured `revert_merge_refused` outcome. Otherwise the
+    # revert PR is left open-but-unmerged and `_existing_revert` no-ops every later run, silently
+    # leaving main red. The branch is NOT deleted on a failed merge (the PR stays for a human).
+    api = FakeApi(checks=[_red_runs()], merge_error=GitHubError(405, "Merge not allowed"))
+    out = revert.run(
+        api, "KGA-Life", "kga-x", merge_sha=MERGE_SHA, pr_number=7, issue_id="KGA-204",
+        git_revert_and_push=lambda *a: None, sleep=_noop_sleep,
+    )
+    assert out["outcome"] == "revert_merge_refused"
+    assert out["status"] == 405
+    assert out["revert_pr"] == 99
+    assert api.created_pulls == [BRANCH]  # the revert PR WAS opened...
+    assert api.deleted_refs == []         # ...but its branch is not deleted on a failed merge
 
 
 def test_run_red_reopen_callback_invoked_when_provided():
