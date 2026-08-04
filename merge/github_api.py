@@ -132,6 +132,18 @@ class GitHubApi:
             {"sha": sha, "merge_method": merge_method},
         )
 
+    def delete_ref(self, owner: str, repo: str, ref: str) -> dict:
+        # Delete a branch (``ref`` = branch name, e.g. ``feat/KGA-204``). Used for post-merge branch
+        # cleanup (KGA-395) so a squash-merged coding branch's unverified commits don't linger.
+        # Idempotent: a 404 (ref already gone) or 422 (never existed) is swallowed, so cleanup can
+        # never fail an otherwise-successful merge.
+        try:
+            return self._request("DELETE", f"/repos/{owner}/{repo}/git/refs/heads/{ref}")
+        except GitHubError as exc:
+            if exc.status in (404, 422):
+                return {}
+            raise
+
     def create_pull(self, owner: str, repo: str, *, title: str, head: str, base: str, body: str) -> dict:
         return self._request(
             "POST",
