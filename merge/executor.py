@@ -12,10 +12,15 @@ head SHA and RE-CHECKS CI-green on that exact SHA. If the head advanced since th
 signals, or CI is not green on the current head, it refuses — a green recorded against a superseded
 SHA never authorises a merge. This substitutes for the branch protection the Free-plan org can't buy.
 
-The merge uses ``merge_method="merge"`` (the repo convention) and never sets the Linear issue Done —
-the PR's ``Closes KGA-###`` keyword auto-transitions it on merge.
+The merge uses ``merge_method="squash"`` (KGA-395). GitHub authors the squash commit **server-side
+and signs it**, so it lands **Verified** on the default branch — whereas the coding agent's own
+feature-branch commits are signed with a key GitHub doesn't recognise (``reason=unknown_key``, an
+artefact of the Managed Agents sandbox, where local signing is impossible). Squashing keeps those
+unverified commits OFF the default branch, and the merged head branch is then DELETED so they don't
+linger anywhere on the repo. The executor never sets the Linear issue Done — the PR's ``Closes
+KGA-###`` keyword auto-transitions it on merge.
 
-CLI: ``python -m merge.executor --owner O --repo R --pr N [--merge-method merge] [--dry-run]``
+CLI: ``python -m merge.executor --owner O --repo R --pr N [--merge-method squash] [--dry-run]``
 (``--dry-run`` evaluates the gate and logs the verdict but does not merge — used to dogfood the gate
 against a real PR without merging it).
 """
@@ -92,7 +97,7 @@ def run(
     repo: str,
     number: int,
     *,
-    merge_method: str = "merge",
+    merge_method: str = "squash",
     dry_run: bool = False,
 ) -> dict:
     """Evaluate the gate and, if authorised, merge — with an immediately-before-merge head-SHA
@@ -163,13 +168,37 @@ def run(
 
     verdict["evidence"]["merged_sha"] = current_sha
     verdict["evidence"]["merge_commit_sha"] = result.get("sha")
+    # KGA-395: with a squash merge the default branch got a Verified commit; now delete the head
+    # branch so the agent's unverified feature-branch commits don't linger. Best-effort, post-merge.
+    deleted_branch = _delete_merged_branch(api, owner, repo, pr2)
+    if deleted_branch:
+        verdict["evidence"]["deleted_branch"] = deleted_branch
     _comment(api, owner, repo, number, _render(verdict, outcome="merged"))
     return {
         "outcome": "merged",
         "verdict": verdict,
         "merged_sha": current_sha,
         "merge_commit_sha": result.get("sha"),
+        "deleted_branch": deleted_branch,
     }
+
+
+def _delete_merged_branch(api: GitHubApi, owner: str, repo: str, pr: dict) -> str | None:
+    """Best-effort delete of the just-squash-merged PR's head branch (KGA-395), so the coding agent's
+    unverified (``unknown_key``) feature-branch commits don't linger in the repo after the squash lands
+    a Verified commit on the default branch. Never deletes the base / default branch. Non-fatal: the
+    merge has already succeeded, so a cleanup failure is logged, not raised (and ``delete_ref`` already
+    swallows a 404/422 for an already-gone ref)."""
+    head_ref = (pr.get("head") or {}).get("ref")
+    base_ref = (pr.get("base") or {}).get("ref")
+    if not head_ref or head_ref in (base_ref, "main", "master"):
+        return None
+    try:
+        api.delete_ref(owner, repo, head_ref)
+        return head_ref
+    except GitHubError as exc:  # never let branch cleanup mask a successful merge
+        print(f"[merge:executor] WARNING could not delete merged branch {head_ref}: {exc}")
+        return None
 
 
 def _is_actionable_deny(verdict: dict) -> bool:
@@ -207,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--owner", required=True)
     ap.add_argument("--repo", required=True)
     ap.add_argument("--pr", type=int, required=True)
-    ap.add_argument("--merge-method", default="merge")
+    ap.add_argument("--merge-method", default="squash")
     ap.add_argument("--dry-run", action="store_true", help="evaluate the gate but do not merge")
     args = ap.parse_args(argv)
 

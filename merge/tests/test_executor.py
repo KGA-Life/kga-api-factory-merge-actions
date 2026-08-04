@@ -15,16 +15,18 @@ B = "bbbbbbbbbbbb2222"
 
 
 class FakeApi:
-    def __init__(self, *, pulls, comments=None, checks, statuses, reviews=None, merge_error=None, merge_result=None):
+    def __init__(self, *, pulls, comments=None, checks, statuses, reviews=None, merge_error=None, merge_result=None, delete_error=None):
         self._pulls = list(pulls)
         self._comments = comments if comments is not None else _final_comments()
         self._checks = list(checks)
         self._statuses = list(statuses)
         self._reviews = list(reviews or [])
         self._merge_error = merge_error
+        self._delete_error = delete_error
         self._merge_result = merge_result or {"sha": "mergecommitsha"}
         self.created_comments: list[str] = []
         self.merge_calls: list[dict] = []
+        self.deleted_refs: list[str] = []
 
     @staticmethod
     def _next(seq):
@@ -55,13 +57,20 @@ class FakeApi:
         self.merge_calls.append({"sha": sha, "merge_method": merge_method})
         return self._merge_result
 
+    def delete_ref(self, o, r, ref):
+        if self._delete_error:
+            raise self._delete_error
+        self.deleted_refs.append(ref)
+        return {}
+
 
 # --- fixtures ----------------------------------------------------------------
-def _open_pr(sha, *, labeled=True, mergeable=None):
+def _open_pr(sha, *, labeled=True, mergeable=None, head_ref="feat/kga-x-7"):
     return {
         "merged": False,
         "state": "open",
-        "head": {"sha": sha},
+        "head": {"sha": sha, "ref": head_ref},
+        "base": {"ref": "main"},
         "labels": [{"name": "merge-candidate"}] if labeled else [{"name": "harness"}],
         "mergeable": mergeable,
     }
@@ -134,11 +143,48 @@ def test_authorised_stable_head_merges_on_current_sha():
     assert out["outcome"] == "merged"
     assert out["merged_sha"] == A
     assert out["merge_commit_sha"] == "mergecommitsha"
-    assert api.merge_calls == [{"sha": A, "merge_method": "merge"}]
+    assert api.merge_calls == [{"sha": A, "merge_method": "squash"}]
+    assert api.deleted_refs == ["feat/kga-x-7"]  # KGA-395: the merged branch is cleaned up
+    assert out["deleted_branch"] == "feat/kga-x-7"
     assert len(api.created_comments) == 1  # the audit record
 
 
 # --- the load-bearing re-verify guards --------------------------------------
+# --- KGA-395: squash + post-merge branch cleanup --------------------------------------------------
+def test_merged_branch_is_deleted_after_squash():
+    # the squash merge lands a Verified commit on main; the head branch (carrying the agent's
+    # unverified commits) is then deleted so nothing unverified lingers.
+    api = FakeApi(pulls=[_open_pr(A, head_ref="feat/KGA-204"), _open_pr(A, head_ref="feat/KGA-204")],
+                  checks=[_green(A), _green(A)], statuses=[_empty_status(), _empty_status()])
+    out = _run(api)
+    assert out["outcome"] == "merged"
+    assert api.merge_calls == [{"sha": A, "merge_method": "squash"}]
+    assert api.deleted_refs == ["feat/KGA-204"]
+    assert out["deleted_branch"] == "feat/KGA-204"
+
+
+def test_base_branch_is_never_deleted():
+    # defensive: a PR whose head ref is the base branch itself must never trigger a base-branch delete.
+    api = FakeApi(pulls=[_open_pr(A, head_ref="main"), _open_pr(A, head_ref="main")],
+                  checks=[_green(A), _green(A)], statuses=[_empty_status(), _empty_status()])
+    out = _run(api)
+    assert out["outcome"] == "merged"
+    assert api.deleted_refs == []
+    assert out["deleted_branch"] is None
+
+
+def test_branch_delete_failure_does_not_fail_the_merge():
+    # a failed branch delete is best-effort: it is swallowed, the merge outcome stands, and
+    # deleted_branch is None (cleanup never masks a successful merge).
+    api = FakeApi(pulls=[_open_pr(A), _open_pr(A)], checks=[_green(A), _green(A)],
+                  statuses=[_empty_status(), _empty_status()],
+                  delete_error=GitHubError(403, "insufficient permission to delete ref"))
+    out = _run(api)
+    assert out["outcome"] == "merged"
+    assert out["deleted_branch"] is None
+    assert api.deleted_refs == []  # the delete raised before recording
+
+
 def test_head_advanced_between_gate_and_merge_aborts_stale():
     # gather saw sha A (green); the re-read sees sha B -> stale, refuse (VG-4).
     api = FakeApi(pulls=[_open_pr(A), _open_pr(B)], checks=[_green(A)], statuses=[_empty_status()])
@@ -193,7 +239,7 @@ def test_failing_ai_review_does_not_block_merge():
     api = FakeApi(pulls=[_open_pr(A), _open_pr(A)], checks=[mixed, mixed], statuses=[_empty_status(), _empty_status()])
     out = _run(api)
     assert out["outcome"] == "merged"
-    assert api.merge_calls == [{"sha": A, "merge_method": "merge"}]
+    assert api.merge_calls == [{"sha": A, "merge_method": "squash"}]
 
 
 # --- KGA-336: the executor must not count its OWN merge-gate check-run as pending CI -------------
@@ -208,7 +254,7 @@ def test_own_merge_gate_check_ignored_by_name_merges():
     api = FakeApi(pulls=[_open_pr(A), _open_pr(A)], checks=[mixed, mixed], statuses=[_empty_status(), _empty_status()])
     out = _run(api)
     assert out["outcome"] == "merged"
-    assert api.merge_calls == [{"sha": A, "merge_method": "merge"}]
+    assert api.merge_calls == [{"sha": A, "merge_method": "squash"}]
 
 
 def test_own_run_dropped_by_run_id_merges(monkeypatch):
@@ -223,7 +269,7 @@ def test_own_run_dropped_by_run_id_merges(monkeypatch):
     api = FakeApi(pulls=[_open_pr(A), _open_pr(A)], checks=[mixed, mixed], statuses=[_empty_status(), _empty_status()])
     out = _run(api)
     assert out["outcome"] == "merged"
-    assert api.merge_calls == [{"sha": A, "merge_method": "merge"}]
+    assert api.merge_calls == [{"sha": A, "merge_method": "squash"}]
 
 
 def test_unrelated_pending_check_still_blocks():
@@ -273,7 +319,7 @@ def test_approving_formal_review_merges():
                   statuses=[_empty_status(), _empty_status()], reviews=[_review("APPROVED")])
     out = _run(api)
     assert out["outcome"] == "merged"
-    assert api.merge_calls == [{"sha": A, "merge_method": "merge"}]
+    assert api.merge_calls == [{"sha": A, "merge_method": "squash"}]
 
 
 def test_no_verdict_is_non_regressive_and_merges():
@@ -284,7 +330,7 @@ def test_no_verdict_is_non_regressive_and_merges():
     out = _run(api)
     assert out["outcome"] == "merged"
     assert out["verdict"]["evidence"]["review_verdict"]["verdict"] == "none"
-    assert api.merge_calls == [{"sha": A, "merge_method": "merge"}]
+    assert api.merge_calls == [{"sha": A, "merge_method": "squash"}]
 
 
 def test_stale_blocking_review_on_old_commit_does_not_block():
@@ -295,7 +341,7 @@ def test_stale_blocking_review_on_old_commit_does_not_block():
                   reviews=[_review("CHANGES_REQUESTED", commit=B)])
     out = _run(api)
     assert out["outcome"] == "merged"
-    assert api.merge_calls == [{"sha": A, "merge_method": "merge"}]
+    assert api.merge_calls == [{"sha": A, "merge_method": "squash"}]
 
 
 def test_later_approval_overrides_earlier_changes_requested():

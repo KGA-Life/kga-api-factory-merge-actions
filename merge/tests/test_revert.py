@@ -21,6 +21,7 @@ class FakeApi:
         self._revert_pr = revert_pr or {"number": 99, "head": {"sha": "revsha"}}
         self.created_pulls: list[str] = []
         self.merge_calls: list = []
+        self.deleted_refs: list[str] = []
         self.comments: list = []
 
     @staticmethod
@@ -42,8 +43,12 @@ class FakeApi:
         return self._revert_pr
 
     def merge_pull(self, o, r, n, *, sha, merge_method="merge"):
-        self.merge_calls.append((n, sha))
+        self.merge_calls.append((n, sha, merge_method))
         return {"sha": "revmergecommit"}
+
+    def delete_ref(self, o, r, ref):
+        self.deleted_refs.append(ref)
+        return {}
 
     def create_comment(self, o, r, n, body):
         self.comments.append((n, body))
@@ -167,7 +172,8 @@ def test_run_red_reverts_and_merges_and_annotates():
     assert out["revert_pr"] == 99
     assert calls == [(MERGE_SHA, BRANCH, "main")]         # git revert on the merge-sha-keyed branch
     assert api.created_pulls == [BRANCH]                   # revert PR opened from that branch
-    assert api.merge_calls == [(99, "revsha")]             # revert PR merged by the same actor
+    assert api.merge_calls == [(99, "revsha", "squash")]  # revert PR squash-merged (KGA-395)
+    assert api.deleted_refs == [BRANCH]                   # ...and its branch cleaned up afterwards
     assert out["linear_reopen"] == "skipped_no_token"      # no Linear callback wired
     assert api.comments and api.comments[0][0] == 7        # original PR annotated
 
