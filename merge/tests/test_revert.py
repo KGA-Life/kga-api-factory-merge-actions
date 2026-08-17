@@ -227,3 +227,45 @@ def test_run_ignores_failing_ai_review_and_stands():
     )
     assert out["outcome"] == "stood"
     assert calls == []
+
+
+def test_run_ignores_pending_deploy_and_stands():
+    # KGA-469, the exact bug: a push-to-main `deploy` check is still in_progress (slow first-run ACM
+    # validation) when post-merge-verify polls; lint-and-test is green. The healthy merge must STAND —
+    # the deploy is in BASE_IGNORE_CHECK_NAMES so it is not counted as pending, and no revert fires.
+    mixed = [
+        {"name": "lint-and-test", "status": "completed", "conclusion": "success", "head_sha": MERGE_SHA},
+        {"name": "deploy", "status": "in_progress", "conclusion": None, "head_sha": MERGE_SHA},
+    ]
+    api = FakeApi(checks=[mixed])
+    calls = []
+    out = revert.run(
+        api, "KGA-Life", "kga-api", merge_sha=MERGE_SHA,
+        git_revert_and_push=lambda *a: calls.append(a), sleep=_noop_sleep,
+    )
+    assert out["outcome"] == "stood"
+    assert calls == [] and api.created_pulls == []
+
+
+def test_run_ignores_failed_deploy_and_stands():
+    # a FAILED deploy is a delivery problem, not a code-correctness one — reverting the code doesn't
+    # fix the deploy, it just thrashes main. lint-and-test green + deploy failed -> the merge stands.
+    mixed = [
+        {"name": "lint-and-test", "status": "completed", "conclusion": "success", "head_sha": MERGE_SHA},
+        {"name": "deploy", "status": "completed", "conclusion": "failure", "head_sha": MERGE_SHA},
+    ]
+    api = FakeApi(checks=[mixed])
+    calls = []
+    out = revert.run(
+        api, "KGA-Life", "kga-api", merge_sha=MERGE_SHA,
+        git_revert_and_push=lambda *a: calls.append(a), sleep=_noop_sleep,
+    )
+    assert out["outcome"] == "stood"
+    assert calls == []
+
+
+def test_base_ignore_check_names_includes_deploy_and_ai_review():
+    # the built-in post-merge ignore set carries both advisory groups by default (no env config).
+    assert "deploy" in revert.BASE_IGNORE_CHECK_NAMES
+    for name in revert.signals.AI_REVIEW_CHECK_NAMES:
+        assert name in revert.BASE_IGNORE_CHECK_NAMES
