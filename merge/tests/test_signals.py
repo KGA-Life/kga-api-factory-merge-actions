@@ -182,6 +182,37 @@ def test_ci_ignore_is_case_insensitive():
     assert green is True
 
 
+def test_ci_ignores_pending_deploy_via_deploy_list():
+    # KGA-469: a still-pending push-to-main `deploy` (slow first-run ACM validation) must NOT make CI
+    # read as not-green — else T47 auto-reverts healthy code. Only the real test/lint run counts.
+    runs = [_run("lint-and-test"), _run("deploy", status="in_progress", conclusion=None)]
+    green, ev = signals.ci_green_for_sha(runs, _status(), SHA, ignore_check_names=signals.DEPLOY_CHECK_NAMES)
+    assert green is True
+    assert ev["pending_runs"] == []
+    assert ev["relevant_run_count"] == 1
+
+
+def test_ci_ignores_failed_deploy_via_deploy_list():
+    # a FAILED deploy is a delivery problem, not a code-correctness problem — it must not gate the
+    # post-merge revert signal (re-run the deploy, don't revert the code).
+    green, _ = signals.ci_green_for_sha(
+        [_run("lint-and-test"), _run("deploy", conclusion="failure")],
+        _status(), SHA, ignore_check_names=signals.DEPLOY_CHECK_NAMES,
+    )
+    assert green is True
+
+
+def test_ci_deploy_ignore_does_not_over_exclude_names_merely_containing_token():
+    # leaf-exact: a real check whose leaf merely CONTAINS "deploy" (e.g. "deploy-smoke-test") is NOT
+    # swept up — only a leaf that IS `deploy` is dropped. So a FAILING "deploy-smoke-test" keeps CI red.
+    green, ev = signals.ci_green_for_sha(
+        [_run("deploy-smoke-test", conclusion="failure"), _run("test")],
+        _status(), SHA, ignore_check_names=signals.DEPLOY_CHECK_NAMES,
+    )
+    assert green is False
+    assert "deploy-smoke-test" in ev["failed_runs"]
+
+
 # --- review_verdict (KGA-337) ------------------------------------------------
 def _rv(state, login="claude[bot]", rid=1, submitted="2026-07-28T10:00:00Z", commit=None):
     r = {"user": {"login": login}, "state": state, "id": rid, "submitted_at": submitted}

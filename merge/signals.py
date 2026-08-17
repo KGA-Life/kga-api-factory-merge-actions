@@ -63,6 +63,18 @@ _OK_CONCLUSIONS = {"success", "neutral", "skipped"}
 # to ``ci_green_for_sha`` via ``ignore_check_names``. (KGA-334)
 AI_REVIEW_CHECK_NAMES = ("claude", "claude-review")
 
+# Deployment/delivery check-runs (`deploy`) are a CONSEQUENCE of a healthy merge, not a VERIFICATION
+# of the merge commit's correctness — and they are slow: a push-to-main deploy's first-run ACM cert
+# DNS-validation can take 8+ minutes, well past the post-merge poll budget. Counting a still-pending
+# (or failed) deploy as "not green" makes T47 auto-revert perfectly good code because its deploy is
+# slow or an infra deploy hiccuped — a category error: the fix for a bad deploy is to re-run the
+# deploy, not to revert the code (which doesn't even fix the deploy, just thrashes `main`). So, like
+# the AI-review runs (KGA-334), deploy checks are excluded from the CI-green signal that gates the
+# post-merge auto-revert. Leaf-exact + case-insensitive (see ci_green_for_sha), so a repo whose job
+# merely *contains* "deploy" isn't swept up — only a check whose leaf IS `deploy`. A repo whose
+# delivery check is named differently extends this via the post-merge ignore env var. (KGA-469)
+DEPLOY_CHECK_NAMES = ("deploy",)
+
 
 def merge_candidate_labeled(
     labels: list[dict], *, label_name: str = DEFAULT_MERGE_CANDIDATE_LABEL

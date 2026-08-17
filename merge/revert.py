@@ -39,6 +39,21 @@ _POLL_INTERVAL = int(os.environ.get("POST_MERGE_POLL_INTERVAL", "15"))
 _GIT_NAME = os.environ.get("GIT_AUTHOR_NAME", "github-actions[bot]")
 _GIT_EMAIL = os.environ.get("GIT_AUTHOR_EMAIL", "41898282+github-actions[bot]@users.noreply.github.com")
 
+# Check-run leaf names EXCLUDED from the post-merge CI-green signal (the signal that decides whether
+# to auto-revert). Built-in defaults, both advisory-vs-the-code:
+#   * AI-review runs (`claude`, `claude-review`) — fail/stall independently of the code (KGA-334);
+#   * deploy/delivery runs (`deploy`) — a slow consequence of a healthy merge, not a verification of
+#     it, so a still-pending/failed deploy must not revert the code (KGA-469).
+# The workflow's OWN `post-merge-verify` check (VERIFY_CHECK_NAME) is excluded separately, in `run`.
+# A repo whose delivery check isn't named `deploy` adds leaf names via POST_MERGE_IGNORE_CHECK_NAMES
+# (comma-separated); it EXTENDS (does not replace) the built-in defaults, so the deploy default always
+# holds. (Contrast the executor's MERGE_IGNORE_CHECK_NAMES, which replaces — there is no deploy check
+# on a PR head pre-merge, so no default there must be preserved.)
+_EXTRA_IGNORE = tuple(
+    n.strip() for n in os.environ.get("POST_MERGE_IGNORE_CHECK_NAMES", "").split(",") if n.strip()
+)
+BASE_IGNORE_CHECK_NAMES = (*signals.AI_REVIEW_CHECK_NAMES, *signals.DEPLOY_CHECK_NAMES, *_EXTRA_IGNORE)
+
 
 def revert_branch_name(merge_sha: str) -> str:
     return f"{REVERT_BRANCH_PREFIX}{merge_sha[:12]}"
@@ -121,12 +136,14 @@ def run(
     sleep=time.sleep,
 ) -> dict:
     """Verify ``main`` on the merge commit and auto-revert if red. Returns a structured outcome."""
-    # Exclude BOTH this workflow's own run (VERIFY_CHECK_NAME) AND the AI-review runs — otherwise the
-    # always-failing `claude-review` check would make the post-merge poll read a healthy merge as red
-    # and auto-revert it (KGA-334). Only the deterministic CI decides.
+    # Exclude this workflow's own run (VERIFY_CHECK_NAME) plus the advisory-vs-the-code checks
+    # (BASE_IGNORE_CHECK_NAMES: the AI-review runs — KGA-334 — and the slow deploy runs — KGA-469).
+    # Otherwise the always-failing `claude-review`, or a still-pending first-run `deploy`, would make
+    # the post-merge poll read a healthy merge as red and auto-revert it. Only the deterministic CI
+    # (lint-and-test) decides.
     green, ci_ev = _poll_ci(
         api, owner, repo, merge_sha,
-        ignore=(VERIFY_CHECK_NAME, *signals.AI_REVIEW_CHECK_NAMES),
+        ignore=(VERIFY_CHECK_NAME, *BASE_IGNORE_CHECK_NAMES),
         sleep=sleep, self_run_id=os.environ.get("GITHUB_RUN_ID"),
     )
     branch = revert_branch_name(merge_sha)
